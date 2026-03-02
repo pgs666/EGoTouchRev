@@ -20,7 +20,7 @@ private:
     void DrawMasterSuffixTable();
     void DrawSlaveSuffixTable();
 
-    void ExportCurrentFrameToCSV();
+    void ExportCurrentFrameToCSV(bool isAutoCapture = false);
 
 private:
     Coordinator* m_coordinator;
@@ -33,6 +33,14 @@ private:
     bool m_fullscreen = false;
     int m_heatmapScale = 10;
     float m_colorRange = 1000.0f;
+
+    // Export Options
+    bool m_exportHeatmap = true;
+    bool m_exportMasterStatus = false;
+    bool m_exportSlaveStatus = false;
+    
+    int m_autoExportTargetPeaks = 0; // 0 = disabled, N = save frame when N fingers detected
+    int m_lastPeakCount = 0;
 };
 
 } // namespace App

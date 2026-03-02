@@ -4,8 +4,13 @@
 #include "SignalConditioningFilter.h"
 #include "GaussianFilter.h"
 #include "SpatialSharpenFilter.h"
+#include "SignalSegmenter.h"
+#include "SignalSegmenter.h"
 #include "CentroidExtractor.h"
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <string>
 
 namespace App {
 
@@ -18,16 +23,22 @@ Coordinator::Coordinator() {
     LOG_INFO("App", "Coordinator::Coordinator", "Unconnected", "Initializing Himax Device Instance (Unconnected)...");
     // 初始化 Hardware 层对象，此时只分配资源，不拉起 I2C 通信
     m_device = std::make_unique<Himax::Chip>(DEVICE_PATH_MASTER, DEVICE_PATH_SLAVE, DEVICE_PATH_INTERRUPT);
+    m_dvrBuffer = std::make_unique<RingBuffer<Engine::HeatmapFrame, 480>>();
 
     // Initialise Engine Pipeline
     m_pipeline.AddProcessor(std::make_unique<Engine::MasterFrameParser>());
     m_pipeline.AddProcessor(std::make_unique<Engine::BaselineSubtraction>());
     m_pipeline.AddProcessor(std::make_unique<Engine::DynamicDeadzoneFilter>());
     m_pipeline.AddProcessor(std::make_unique<Engine::SignalConditioningFilter>());
-    m_pipeline.AddProcessor(std::make_unique<Engine::GaussianFilter>());
+    // m_pipeline.AddProcessor(std::make_unique<Engine::GaussianFilter>()); // Removed temporarily to test aggressive peaks
+
     // Unsharp masking filter to separate highly merged fingers *before* extraction
     m_pipeline.AddProcessor(std::make_unique<Engine::SpatialSharpenFilter>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::SignalSegmenter>());
     m_pipeline.AddProcessor(std::make_unique<Engine::CentroidExtractor>());
+    
+    // Load config on startup
+    LoadConfig();
 }
 
 Coordinator::~Coordinator() {
@@ -111,7 +122,7 @@ void Coordinator::ProcessingThreadFunc() {
                 }
 
                 // Push to DVR buffer (automatically overwrites old frames)
-                m_dvrBuffer.PushOverwriting(frame);
+                m_dvrBuffer->PushOverwriting(frame);
 
                 // TODO: (Stage 3) 交给 Host::VhfInjector 发送 HID Report
             }
@@ -129,8 +140,13 @@ void Coordinator::SystemStateThreadFunc() {
     LOG_INFO("App", "Coordinator::SystemStateThreadFunc", "Unknown", "SystemState Thread stopped.");
 }
 
-void Coordinator::TriggerDVRExport() {
-    auto snapshot = m_dvrBuffer.GetSnapshot();
+void Coordinator::TriggerDVRExport(bool exportHeatmap, bool exportMasterStatus, bool exportSlaveStatus) {
+    if (!m_dvrBuffer) {
+        LOG_ERROR("App", "Coordinator::TriggerDVRExport", "Unknown", "DVR buffer is not initialized.");
+        return;
+    }
+
+    auto snapshot = m_dvrBuffer->GetSnapshot();
     if (snapshot.empty()) {
         LOG_WARN("App", "Coordinator::TriggerDVRExport", "Unknown", "DVR buffer is empty, nothing to export.");
         return;
@@ -140,44 +156,139 @@ void Coordinator::TriggerDVRExport() {
     auto time_t_now = std::chrono::system_clock::to_time_t(now);
     struct tm time_info;
     localtime_s(&time_info, &time_t_now);
+    
+    std::filesystem::path dir("exports/dvr");
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        LOG_ERROR("App", "Coordinator::TriggerDVRExport", "Unknown", "Failed to create directory: exports/dvr");
+    }
 
     char filename[128];
     sprintf_s(filename, "dvr_backtrack_%04d%02d%02d_%02d%02d%02d.csv",
               time_info.tm_year + 1900, time_info.tm_mon + 1, time_info.tm_mday,
               time_info.tm_hour, time_info.tm_min, time_info.tm_sec);
+              
+    std::filesystem::path fullPath = dir / filename;
 
     FILE* fp = nullptr;
-    fopen_s(&fp, filename, "w");
+    fopen_s(&fp, fullPath.string().c_str(), "w");
     if (!fp) {
-        LOG_ERROR("App", "Coordinator::TriggerDVRExport", "Unknown", "Failed to create DVR export file: %s", filename);
+        LOG_ERROR("App", "Coordinator::TriggerDVRExport", "Unknown", "Failed to create DVR export file: %s", fullPath.string().c_str());
         return;
     }
 
-    LOG_INFO("App", "Coordinator::TriggerDVRExport", "Unknown", "Exporting %zu frames to %s...", snapshot.size(), filename);
+    LOG_INFO("App", "Coordinator::TriggerDVRExport", "Unknown", "Exporting %zu frames to %s...", snapshot.size(), fullPath.string().c_str());
 
     for (size_t i = 0; i < snapshot.size(); ++i) {
         const auto& f = snapshot[i];
         fprintf(fp, "--- Frame [%zu] --- TS: %llu\n", i, f.timestamp);
         
-        // Heatmap
-        for (int y = 0; y < 40; ++y) {
-            for (int x = 0; x < 60; ++x) {
-                fprintf(fp, "%d%s", f.heatmapMatrix[y][x], (x == 59 ? "" : ","));
-            }
-            fprintf(fp, "\n");
-        }
-
-        // Contacts
+        // Contacts are always printed
         fprintf(fp, "Contacts: %zu\n", f.contacts.size());
         for (const auto& c : f.contacts) {
             fprintf(fp, "ID:%d, X:%.3f, Y:%.3f, State:%d, Area:%d\n", 
                     c.id, c.x, c.y, c.state, c.area);
         }
+        
+        if (exportHeatmap) {
+            fprintf(fp, "Heatmap:\n");
+            for (int y = 0; y < 40; ++y) {
+                for (int x = 0; x < 60; ++x) {
+                    fprintf(fp, "%d%s", f.heatmapMatrix[y][x], (x == 59 ? "" : ","));
+                }
+                fprintf(fp, "\n");
+            }
+        }
+
+        if (exportMasterStatus) {
+            fprintf(fp, "Master Status Suffix:\n");
+            if (f.rawData.size() >= 5063) {
+                const uint8_t* ptr = f.rawData.data() + 4807;
+                for (int j = 0; j < 128; ++j) {
+                    uint16_t val = static_cast<uint16_t>(ptr[j * 2] | (ptr[j * 2 + 1] << 8));
+                    fprintf(fp, "%d%s", val, (j == 127 ? "" : ","));
+                }
+                fprintf(fp, "\n");
+            } else {
+                fprintf(fp, "Data unavailable\n");
+            }
+        }
+
+        if (exportSlaveStatus) {
+            fprintf(fp, "Slave Status Suffix:\n");
+            if (f.rawData.size() >= 5402) {
+                const uint8_t* ptr = f.rawData.data() + 5070;
+                for (int j = 0; j < 166; ++j) {
+                    uint16_t val = static_cast<uint16_t>(ptr[j * 2] | (ptr[j * 2 + 1] << 8));
+                    fprintf(fp, "%d%s", val, (j == 165 ? "" : ","));
+                }
+                fprintf(fp, "\n");
+            } else {
+                fprintf(fp, "Data unavailable\n");
+            }
+        }
+        
         fprintf(fp, "\n");
     }
 
     fclose(fp);
-    LOG_INFO("App", "Coordinator::TriggerDVRExport", "Unknown", "DVR Export Complete: %s", filename);
+    LOG_INFO("App", "Coordinator::TriggerDVRExport", "Unknown", "DVR Export Complete: %s", fullPath.string().c_str());
+}
+
+void Coordinator::SaveConfig() {
+    std::ofstream out("config.ini");
+    if (!out.is_open()) {
+        LOG_ERROR("App", "Coordinator::SaveConfig", "System", "Failed to open config.ini for writing.");
+        return;
+    }
+    for (const auto& p : m_pipeline.GetProcessors()) {
+        out << "[" << p->GetName() << "]\n";
+        p->SaveConfig(out);
+        out << "\n";
+    }
+    out.close();
+    LOG_INFO("App", "Coordinator::SaveConfig", "System", "Successfully saved global parameters to config.ini");
+}
+
+void Coordinator::LoadConfig() {
+    std::ifstream in("config.ini");
+    if (!in.is_open()) {
+        LOG_INFO("App", "Coordinator::LoadConfig", "System", "No config.ini found. Using default parameters.");
+        return;
+    }
+    
+    std::string line;
+    Engine::IFrameProcessor* currentProcessor = nullptr;
+    
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back(); // Handle Windows CRLF
+        if (line.empty() || line[0] == ';') continue;
+        
+        if (line[0] == '[') {
+            size_t endBracket = line.find(']');
+            if (endBracket != std::string::npos) {
+                std::string section = line.substr(1, endBracket - 1);
+                currentProcessor = nullptr;
+                for (const auto& p : m_pipeline.GetProcessors()) {
+                    if (p->GetName() == section) {
+                        currentProcessor = p.get();
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        
+        auto pos = line.find('=');
+        if (pos != std::string::npos && currentProcessor) {
+            std::string key = line.substr(0, pos);
+            std::string val = line.substr(pos + 1);
+            currentProcessor->LoadConfig(key, val);
+        }
+    }
+    in.close();
+    LOG_INFO("App", "Coordinator::LoadConfig", "System", "Successfully loaded global parameters from config.ini");
 }
 
 } // namespace App

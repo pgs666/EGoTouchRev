@@ -35,16 +35,20 @@ public:
     // 数据采集循环控制
     void SetAcquisitionActive(bool active) { m_isAcquiring.store(active); }
     bool IsAcquisitionActive() const { return m_isAcquiring.load(); }
+    
+    // 全局参数配置加载与保存
+    void SaveConfig();
+    void LoadConfig();
 
     /**
      * @brief 触发回放数据导出 (Replay/DVR Export)
      * 
      * 该功能实现“时间溯源”式的回放：
-     * 系统在后台自动维护一个环形缓冲区（Rolling Buffer），循环记录最新的 120 帧（约 2 秒历史）。
+    * 系统在后台自动维护一个环形缓冲区（Rolling Buffer），循环记录最新的 480 帧（约 4 秒历史）。
      * 当用户发现特定异常场景时（如：断线、跳动），点击导出按钮可将缓存中的原始热力图及
      * 算法处理后的坐标点完整序列快照导出为 CSV 文件，用于离线算法回放与精度复现。
      */
-    void TriggerDVRExport();
+    void TriggerDVRExport(bool exportHeatmap, bool exportMasterStatus, bool exportSlaveStatus);
 
 private:
     void AcquisitionThreadFunc();
@@ -74,7 +78,9 @@ private:
     Engine::HeatmapFrame m_latestFrame;
 
     // Time Backtrack (DVR) rolling buffer
-    RingBuffer<Engine::HeatmapFrame, 120> m_dvrBuffer;
+    // NOTE: Keep this on heap because HeatmapFrame is large and 480-capacity
+    // ring buffer can otherwise make Coordinator too large for stack allocation.
+    std::unique_ptr<RingBuffer<Engine::HeatmapFrame, 480>> m_dvrBuffer;
 };
 
 } // namespace App

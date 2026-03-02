@@ -1,11 +1,15 @@
 #include "DiagnosticUI.h"
 #include "HimaxChip.h"
+#include "SignalSegmenter.h"
 #include "imgui.h"
+#include "Logger.h"
 #include "Logger.h"
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <chrono>
+#include <filesystem>
+#include <thread>
 
 namespace App {
 
@@ -15,6 +19,7 @@ DiagnosticUI::DiagnosticUI(Coordinator* coordinator) : m_coordinator(coordinator
 DiagnosticUI::~DiagnosticUI() {
 }
 
+// ... rest of the content up to DrawHeatmap
 void DiagnosticUI::Render() {
     // 拉取最新的数据
     if (m_autoRefresh && m_coordinator) {
@@ -30,7 +35,14 @@ void DiagnosticUI::Render() {
 }
 
 void DiagnosticUI::DrawControlPanel() {
+    ImGui::SetNextWindowPos(ImVec2(100, 100), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(400, 800), ImGuiCond_FirstUseEver);
     ImGui::Begin("Device Control Panel");
+    
+    if (ImGui::Button("EXIT APPLICATION", ImVec2(-1, 30))) {
+        exit(0);
+    }
+    ImGui::Separator();
     
     if (m_coordinator) {
         Himax::Chip* chip = m_coordinator->GetDevice();
@@ -93,16 +105,40 @@ void DiagnosticUI::DrawControlPanel() {
         }
     }
     
+    bool isActive = m_coordinator->IsAcquisitionActive();
+    if (ImGui::Button(isActive ? "Stop AFE" : "Start AFE")) {
+        m_coordinator->SetAcquisitionActive(!isActive);
+    }
+    
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+    if (ImGui::Button("Save Global Parameters")) {
+        m_coordinator->SaveConfig();
+    }
+    ImGui::PopStyleColor();
+
     ImGui::Separator();
+    
+    ImGui::Text("Export Options");
+    ImGui::Checkbox("Heatmap", &m_exportHeatmap);
+    ImGui::SameLine();
+    ImGui::Checkbox("Master Status", &m_exportMasterStatus);
+    ImGui::SameLine();
+    ImGui::Checkbox("Slave Status", &m_exportSlaveStatus);
+
     if (ImGui::Button("Export Frame to CSV")) {
-        ExportCurrentFrameToCSV();
+        ExportCurrentFrameToCSV(false); // Manual
     }
     ImGui::SameLine();
-    if (ImGui::Button("Export DVR (Last 120 Frames)")) {
+    if (ImGui::Button("Export DVR (Last 480 Frames)")) {
         if (m_coordinator) {
-            m_coordinator->TriggerDVRExport();
+            m_coordinator->TriggerDVRExport(m_exportHeatmap, m_exportMasterStatus, m_exportSlaveStatus);
         }
     }
+    
+    ImGui::Separator();
+    ImGui::Text("Auto-Capture (Debug)");
+    ImGui::SliderInt("Target Peaks", &m_autoExportTargetPeaks, 0, 5, m_autoExportTargetPeaks == 0 ? "Disabled" : "%d Peaks");
     
     if (m_coordinator) {
         ImGui::Separator();
@@ -152,13 +188,12 @@ void DiagnosticUI::DrawHeatmap() {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
 
     if (m_fullscreen) {
-        ImGui::SetNextWindowPos(viewport->WorkPos);
-        ImGui::SetNextWindowSize(viewport->WorkSize);
-        ImGui::SetNextWindowViewport(viewport->ID);
-        window_flags |= ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings;
-        window_flags |= ImGuiWindowFlags_NoBackground;
+        // Fullscreen disabled logic or replaced logic since Main Window is hidden
+        // Can be kept as is, but users should just maximize the loose viewport window manually now.
     }
 
+    ImGui::SetNextWindowPos(ImVec2(550, 100), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(600, 800), ImGuiCond_FirstUseEver);
     ImGui::Begin("Raw Heatmap Visualization (40x60)", nullptr, window_flags);
     
     // In multi-viewport mode, if the window is outside, GetContentRegionAvail might refer to its own OS window
@@ -218,6 +253,66 @@ void DiagnosticUI::DrawHeatmap() {
             
             // 画边线 (全屏模式下为了 1:1 视觉效果可以考虑减淡或者移除边线)
             draw_list->AddRect(p_min, p_max, IM_COL32(50, 50, 50, m_fullscreen ? 50 : 255));
+        }
+    }
+    
+    // 绘制 Signal Segmenter (Phase 1) 提取到的 Peaks
+    if (m_coordinator) {
+        const auto& processors = m_coordinator->GetPipeline().GetProcessors();
+        for (const auto& proc : processors) {
+            // Find our SignalSegmenter in the pipeline
+            if (auto segmenter = dynamic_cast<Engine::SignalSegmenter*>(proc.get())) {
+                if (segmenter->IsEnabled()) {
+                    int currentPeakCount = segmenter->GetDebugPeaks().size();
+                    
+                    // Auto-Capture logic for N fingers
+                    if (m_autoExportTargetPeaks > 0 && 
+                        currentPeakCount == m_autoExportTargetPeaks && 
+                        m_lastPeakCount != m_autoExportTargetPeaks) {
+                        ExportCurrentFrameToCSV(true); // Auto
+                    }
+                    m_lastPeakCount = currentPeakCount;
+
+                    for (const auto& peak : segmenter->GetDebugPeaks()) {
+                        int pr = peak.first;
+                        int pc = peak.second;
+                        int16_t peakValue = m_currentFrame.heatmapMatrix[pr][pc];
+                        
+                        // Mirror matrix coordinates exactly like the heatmap loop above
+                        int mirrored_r = rows - 1 - pr;
+                        int mirrored_c = cols - 1 - pc;
+                        
+                        // Calculate center of the cell
+                        float cx = canvas_p.x + mirrored_c * cell_w + cell_w * 0.5f;
+                        float cy = canvas_p.y + mirrored_r * cell_h + cell_h * 0.5f;
+                        
+                        // Draw a prominent Yellow Cross marker
+                        ImU32 markerColor = IM_COL32(255, 255, 0, 255); // Yellow
+                        float crossSize = std::min(cell_w, cell_h) * 0.4f; // 80% of cell size
+                        
+                        draw_list->AddLine(ImVec2(cx - crossSize, cy), ImVec2(cx + crossSize, cy), markerColor, 2.0f);
+                        draw_list->AddLine(ImVec2(cx, cy - crossSize), ImVec2(cx, cy + crossSize), markerColor, 2.0f);
+                        
+                        // Draw the pressure value text
+                        char label[32];
+                        snprintf(label, sizeof(label), "%d", peakValue);
+                        ImU32 textColor = IM_COL32(255, 255, 255, 255); // White text
+                        ImU32 outlineColor = IM_COL32(0, 0, 0, 255);    // Black outline for contrast
+
+                        ImVec2 textPos(cx + 2.0f, cy + 2.0f);
+                        
+                        // Draw text outline (shadow) for readability
+                        draw_list->AddText(ImVec2(textPos.x - 1, textPos.y - 1), outlineColor, label);
+                        draw_list->AddText(ImVec2(textPos.x + 1, textPos.y - 1), outlineColor, label);
+                        draw_list->AddText(ImVec2(textPos.x - 1, textPos.y + 1), outlineColor, label);
+                        draw_list->AddText(ImVec2(textPos.x + 1, textPos.y + 1), outlineColor, label);
+                        
+                        // Draw main text
+                        draw_list->AddText(textPos, textColor, label);
+                    }
+                }
+                break; // Found it, no need to keep looking
+            }
         }
     }
     
@@ -302,67 +397,92 @@ void DiagnosticUI::DrawSlaveSuffixTable() {
     ImGui::End();
 }
 
-void DiagnosticUI::ExportCurrentFrameToCSV() {
+void DiagnosticUI::ExportCurrentFrameToCSV(bool isAutoCapture) {
     auto now = std::chrono::system_clock::now();
     std::time_t time_now = std::chrono::system_clock::to_time_t(now);
     std::tm* tm_now = std::localtime(&time_now);
     
+    // Create folders
+    std::string baseFolder = "exports";
+    std::string subFolder = isAutoCapture ? "auto" : "manual";
+    std::filesystem::path dir(baseFolder);
+    dir /= subFolder;
+    
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        LOG_ERROR("App", "DiagnosticUI::ExportCurrentFrameToCSV", "System", "Failed to create directory: {}", dir.string());
+    }
+    
+    // We add a high-resolution counter parameter or thread ID to absolutely guarantee no overwrites
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    static uint32_t captureCounter = 0;
+    
     std::ostringstream filename;
     filename << "heatmap_" 
              << std::put_time(tm_now, "%Y%m%d_%H%M%S") << "_" 
-             << (m_currentFrame.timestamp % 1000) 
+             << std::setfill('0') << std::setw(3) << ms.count() << "_"
+             << captureCounter++
              << ".csv";
+             
+    std::filesystem::path fullPath = dir / filename.str();
 
-    std::ofstream out(filename.str());
+    std::ofstream out(fullPath.string());
     if (!out.is_open()) {
-        LOG_INFO("App", "DiagnosticUI::ExportCurrentFrameToCSV", "Error", "Failed to open file for writing.");
+        LOG_INFO("App", "DiagnosticUI::ExportCurrentFrameToCSV", "Error", "Failed to open file for writing: {}", fullPath.string());
         return;
     }
 
     out << "--- EGoTouch Frame Export ---\n";
     out << "Timestamp: " << m_currentFrame.timestamp << "\n\n";
 
-    out << "--- Heatmap (40 rows x 60 cols) ---\n";
-    for (int y = 0; y < 40; ++y) {
-        for (int x = 0; x < 60; ++x) {
-            out << m_currentFrame.heatmapMatrix[y][x];
-            if (x < 59) out << ",";
+    if (m_exportHeatmap) {
+        out << "--- Heatmap (40 rows x 60 cols) ---\n";
+        for (int y = 0; y < 40; ++y) {
+            for (int x = 0; x < 60; ++x) {
+                out << m_currentFrame.heatmapMatrix[y][x];
+                if (x < 59) out << ",";
+            }
+            out << "\n";
         }
-        out << "\n";
     }
 
-    out << "\n--- Master Frame Suffix (128 words) ---\n";
-    if (m_currentFrame.rawData.size() >= 5063) {
-        const uint8_t* ptr = m_currentFrame.rawData.data() + 4807;
-        for (int i = 0; i < 128; ++i) {
-            uint16_t val = static_cast<uint16_t>(ptr[i * 2] | (ptr[i * 2 + 1] << 8));
-            out << val;
-            if (i < 127) {
-                out << (((i + 1) % 16 == 0) ? "\n" : ",");
+    if (m_exportMasterStatus) {
+        out << "\n--- Master Frame Suffix (128 words) ---\n";
+        if (m_currentFrame.rawData.size() >= 5063) {
+            const uint8_t* ptr = m_currentFrame.rawData.data() + 4807;
+            for (int i = 0; i < 128; ++i) {
+                uint16_t val = static_cast<uint16_t>(ptr[i * 2] | (ptr[i * 2 + 1] << 8));
+                out << val;
+                if (i < 127) {
+                    out << (((i + 1) % 16 == 0) ? "\n" : ",");
+                }
             }
+            out << "\n";
+        } else {
+            out << "Data unavailable\n";
         }
-        out << "\n";
-    } else {
-        out << "Data unavailable\n";
     }
 
-    out << "\n--- Slave Frame Suffix (166 words) ---\n";
-    if (m_currentFrame.rawData.size() >= 5402) {
-        const uint8_t* ptr = m_currentFrame.rawData.data() + 5070;
-        for (int i = 0; i < 166; ++i) {
-            uint16_t val = static_cast<uint16_t>(ptr[i * 2] | (ptr[i * 2 + 1] << 8));
-            out << val;
-            if (i < 165) {
-                out << (((i + 1) % 16 == 0) ? "\n" : ",");
+    if (m_exportSlaveStatus) {
+        out << "\n--- Slave Frame Suffix (166 words) ---\n";
+        if (m_currentFrame.rawData.size() >= 5402) {
+            const uint8_t* ptr = m_currentFrame.rawData.data() + 5070;
+            for (int i = 0; i < 166; ++i) {
+                uint16_t val = static_cast<uint16_t>(ptr[i * 2] | (ptr[i * 2 + 1] << 8));
+                out << val;
+                if (i < 165) {
+                    out << (((i + 1) % 16 == 0) ? "\n" : ",");
+                }
             }
+            out << "\n";
+        } else {
+            out << "Data unavailable\n";
         }
-        out << "\n";
-    } else {
-        out << "Data unavailable\n";
     }
 
     out.close();
-    LOG_INFO("App", "DiagnosticUI::ExportCurrentFrameToCSV", "UI", "Frame exported to {}", filename.str());
+    LOG_INFO("App", "DiagnosticUI::ExportCurrentFrameToCSV", "UI", "Frame exported to {}", fullPath.string());
 }
 
 } // namespace App

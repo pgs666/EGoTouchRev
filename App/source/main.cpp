@@ -48,10 +48,13 @@ int main(int, char**)
     App::DiagnosticUI diagnosticUI(&coordinator);
 
     // Create application window
-    // ImGui_ImplWin32_EnableDpiAwareness();
-    WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"ImGui Example", nullptr };
+    ImGui_ImplWin32_EnableDpiAwareness(); // 1. Fix DPI Issues on Multi-Monitor
+    WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"EGoTouchApp", nullptr };
     ::RegisterClassExW(&wc);
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"EGoTouch Diagnostics (DirectX 11)", WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
+    
+    // 2. Hide Main Window: Create as WS_POPUP and WS_EX_TOOLWINDOW off-screen
+    HWND hwnd = ::CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"EGoTouch Diagnostics (Hidden Main)", WS_POPUP, 
+                                  -10000, -10000, 100, 100, nullptr, nullptr, wc.hInstance, nullptr);
 
     // Initialize Direct3D
     if (!CreateDeviceD3D(hwnd))
@@ -61,8 +64,8 @@ int main(int, char**)
         return 1;
     }
 
-    // Show the window
-    ::ShowWindow(hwnd, SW_SHOWDEFAULT);
+    // Hide the main window completely so user just sees the floating ImGui windows
+    ::ShowWindow(hwnd, SW_HIDE);
     ::UpdateWindow(hwnd);
 
     // Setup Dear ImGui context
@@ -73,6 +76,8 @@ int main(int, char**)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;         // Enable Docking
     io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;       // Enable Multi-Viewport
+    io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports; // Enable secondary viewport DPI scaling
+    io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleFonts;     // Enable DPI scaled fonts
     
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();

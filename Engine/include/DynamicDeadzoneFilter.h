@@ -17,6 +17,16 @@ public:
     std::string GetName() const override { return "Dynamic Row Deadzone"; }
 
     void DrawConfigUI() override;
+    
+    void SaveConfig(std::ostream& out) const override {
+        IFrameProcessor::SaveConfig(out);
+        out << "ShrinkPercent=" << m_shrinkPercent << "\n";
+    }
+    
+    void LoadConfig(const std::string& key, const std::string& value) override {
+        IFrameProcessor::LoadConfig(key, value);
+        if (key == "ShrinkPercent") m_shrinkPercent = std::stoi(value);
+    }
 
 private:
     int m_shrinkPercent = 20; // 默认取行最高峰的 20% 作为噪声截断线

@@ -28,7 +28,8 @@ public:
 
     static std::vector<FingerCenter> analyze_and_segment_blob(
         const std::vector<TouchPoint>& blob, 
-        const int16_t global_grid[40][60]);
+        const int16_t global_grid[40][60],
+        int depth = 0);
 };
 
 class CentroidExtractor : public IFrameProcessor {

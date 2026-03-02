@@ -17,6 +17,16 @@ public:
     void SetEnabled(bool enabled) override { m_enabled = enabled; }
     
     void DrawConfigUI() override;
+    
+    void SaveConfig(std::ostream& out) const override {
+        IFrameProcessor::SaveConfig(out);
+        out << "Strength=" << m_strength << "\n";
+    }
+    
+    void LoadConfig(const std::string& key, const std::string& value) override {
+        IFrameProcessor::LoadConfig(key, value);
+        if (key == "Strength") m_strength = std::stof(value);
+    }
 
 private:
     bool m_enabled = false; // Default off, let the user toggle when needed

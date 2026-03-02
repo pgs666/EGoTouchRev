@@ -1,6 +1,8 @@
 #pragma once
 #include "EngineTypes.h"
 #include <string>
+#include <iostream>
+#include <map>
 
 namespace Engine {
 
@@ -31,6 +33,15 @@ public:
 
     // Draw ImGui configuration panel for specific parameters
     virtual void DrawConfigUI() {}
+
+    // Configuration Serialization
+    virtual void SaveConfig(std::ostream& out) const {
+        out << "Enabled=" << m_enabled << "\n";
+    }
+    
+    virtual void LoadConfig(const std::string& key, const std::string& value) {
+        if (key == "Enabled") m_enabled = (value == "1" || value == "true");
+    }
 
 protected:
     bool m_enabled = true;

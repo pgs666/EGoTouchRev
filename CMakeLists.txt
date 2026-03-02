@@ -73,6 +73,7 @@ add_library(Engine STATIC
     Engine/source/SignalConditioningFilter.cpp
     Engine/source/GaussianFilter.cpp
     Engine/source/SpatialSharpenFilter.cpp
+    Engine/source/SignalSegmenter.cpp
     Engine/source/CentroidExtractor.cpp
     ${ENGINE_HEADERS}
 )

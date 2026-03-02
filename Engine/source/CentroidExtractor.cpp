@@ -7,9 +7,12 @@
 
 namespace Engine {
 
+// 注意：请确保在 CentroidExtractor.h 中将此函数的签名更新为：
+// static std::vector<FingerCenter> analyze_and_segment_blob(const std::vector<TouchPoint>& blob, const int16_t global_grid[40][60], int depth = 0);
 std::vector<FingerCenter> TouchSegmenter::analyze_and_segment_blob(
     const std::vector<TouchPoint>& blob, 
-    const int16_t global_grid[40][60])
+    const int16_t global_grid[40][60],
+    int depth)
 {
     if (blob.empty()) return {};
     
@@ -20,12 +23,16 @@ std::vector<FingerCenter> TouchSegmenter::analyze_and_segment_blob(
         sum_x += p.x * p.weight; 
         sum_y += p.y * p.weight;
     }
+    // 防止除零保护
+    if (sum_weight <= 0.f) return {};
+    
     float mean_x = sum_x / sum_weight; 
     float mean_y = sum_y / sum_weight;
 
+    // 像素点过少，没有切分价值，直接返回
     if (blob.size() < 4) return { {mean_x, mean_y, sum_weight} };
 
-    // 2. PCA
+    // 2. PCA Covariance Matrix
     float c_xx = 0.f, c_xy = 0.f, c_yy = 0.f;
     for (const auto& p : blob) {
         float dx = p.x - mean_x; 
@@ -36,6 +43,7 @@ std::vector<FingerCenter> TouchSegmenter::analyze_and_segment_blob(
     }
     c_xx /= sum_weight; c_xy /= sum_weight; c_yy /= sum_weight;
 
+    // Eigenvalues calculation
     float b = c_xx + c_yy;
     float c = c_xx * c_yy - c_xy * c_xy;
     float delta = std::max(0.f, b * b - 4 * c);
@@ -45,28 +53,32 @@ std::vector<FingerCenter> TouchSegmenter::analyze_and_segment_blob(
 
     float aspect_ratio = lambda1 / lambda2;
 
-    // Defense 1: Fat Thumb Check
+    // --- Defense 1: Fat Thumb Check ---
+    // 如果短轴方差极大，说明这是一个大面积压下的单指（如大拇指指腹），拒绝切分
     if (lambda2 > MAX_MINOR_AXIS_VARIANCE) {
         return { {mean_x, mean_y, sum_weight} }; 
     }
 
-    // === 【核心修改：Decision Engine 增加绝对热力阈值干预】 ===
-    // 如果长宽比超过阈值，或者总重量极大（对抗肩部融合的斜坡被隐藏），都强行进入切分！
+    // --- Decision Engine: 决定是否需要切分 ---
+    // 条件1: 形状像花生米 (aspect_ratio > 1.9)
+    // 条件2: 这是一个巨无霸热力斑块，不管形状如何，肯定包含多指 (sum_weight > 7000)
     bool is_merged = (aspect_ratio > ASPECT_RATIO_THRESHOLD) || (sum_weight > HUGE_WEIGHT_THRESHOLD);
-    if (!is_merged) {
+    
+    // 如果不满足切分条件，或者已经达到了最大递归深度 (2层足够分出4根手指)，则输出当前质心
+    if (!is_merged || depth >= 2) {
         return { {mean_x, mean_y, sum_weight} }; 
     }
 
-    // Initialize K-Means centers along the major axis
+    // --- Initialize K-Means centers along the major axis ---
     float vx = c_xy, vy = lambda1 - c_xx;
     float norm = std::sqrt(vx*vx + vy*vy);
-    if (norm > 1e-5f) { vx /= norm; vy /= norm; } else { vx = 1; vy = 0; }
+    if (norm > 1e-5f) { vx /= norm; vy /= norm; } else { vx = 1.0f; vy = 0.0f; }
     
     float spread = std::sqrt(lambda1);
     FingerCenter center1 { mean_x + 0.4f * spread * vx, mean_y + 0.4f * spread * vy, 0.f };
     FingerCenter center2 { mean_x - 0.4f * spread * vx, mean_y - 0.4f * spread * vy, 0.f };
 
-    // K-Means Iteration (4 times is enough for convergence)
+    // K-Means Iteration (4 times for fast convergence)
     for (int iter = 0; iter < 4; ++iter) {
         float sum_w1 = 0.f, sum_x1 = 0.f, sum_y1 = 0.f;
         float sum_w2 = 0.f, sum_x2 = 0.f, sum_y2 = 0.f;
@@ -85,13 +97,14 @@ std::vector<FingerCenter> TouchSegmenter::analyze_and_segment_blob(
         if (sum_w2 > 0) { center2.x = sum_x2 / sum_w2; center2.y = sum_y2 / sum_w2; center2.total_weight = sum_w2; }
     }
 
-    // Defense 2: Physical Bone-Distance Check
+    // --- Defense 2: Physical Bone-Distance Check ---
+    // 如果切开的两个质心距离不符合人类手指物理极限，说明误切了单指，合并退回
     float final_dist = std::sqrt(std::pow(center1.x - center2.x, 2) + std::pow(center1.y - center2.y, 2));
     if (final_dist < MIN_PHYSICAL_DISTANCE) {
         return { {mean_x, mean_y, sum_weight} }; 
     }
 
-    // Defense 3: Valley Profile Check
+    // --- Defense 3: Valley Profile Check (谷底特征与深度比检测) ---
     int mid_x = std::clamp((int)std::round((center1.x + center2.x) / 2.0f), 0, 59);
     int mid_y = std::clamp((int)std::round((center1.y + center2.y) / 2.0f), 0, 39);
     
@@ -104,20 +117,47 @@ std::vector<FingerCenter> TouchSegmenter::analyze_and_segment_blob(
     int c2_val = global_grid[cy2][cx2];
     int mid_val = global_grid[mid_y][mid_x];
 
-    if (mid_val >= std::min(c1_val, c2_val)) {
-        // === 【同步修改：这里也应使用常量而非写死 8000】 ===
+    // 获取两端较小的那个峰值
+    int min_peak = std::min(c1_val, c2_val);
+
+    // 1. 如果中点隆起（完全没有凹陷），通常判定为单指平压。
+    // （保留之前的肩部融合豁免：如果重量极大，允许强行劈开）
+    if (mid_val >= min_peak) {
         if (sum_weight < HUGE_WEIGHT_THRESHOLD) {
             return { {mean_x, mean_y, sum_weight} };
         }
+    } 
+    // 2. 【新增防线：谷底深度比】如果虽然有凹陷，但凹陷极其微弱（比如大于较小峰值的 85%）
+    // 这说明这是由于单根手指的骨骼（指尖+关节）造成的微弱起伏，并非两指缝隙！
+    else if (mid_val > min_peak * 0.75f) {
+        // 拒绝切分，将其视为一根平放的手指
+        return { {mean_x, mean_y, sum_weight} };
     }
 
-    return {center1, center2};
-}
+    // ==========================================
+    // --- Recursive Splitting (应对3指、4指连体) ---
+    // ==========================================
+    std::vector<TouchPoint> sub_blob1;
+    std::vector<TouchPoint> sub_blob2;
 
-// ---------------------------------------------------------
-// 后续的 CentroidExtractor::Process 与原版完全保持一致，无需修改。
-// 因为你的 BFS 和 8连通域算法写得非常标准且高效！
-// ...
+    for (const auto& p : blob) {
+        float d1 = (p.x - center1.x)*(p.x - center1.x) + (p.y - center1.y)*(p.y - center1.y);
+        float d2 = (p.x - center2.x)*(p.x - center2.x) + (p.y - center2.y)*(p.y - center2.y);
+        if (d1 < d2) {
+            sub_blob1.push_back(p);
+        } else {
+            sub_blob2.push_back(p);
+        }
+    }
+
+    // 对分割出来的两个子热力斑块分别进行递归诊断
+    std::vector<FingerCenter> result1 = analyze_and_segment_blob(sub_blob1, global_grid, depth + 1);
+    std::vector<FingerCenter> result2 = analyze_and_segment_blob(sub_blob2, global_grid, depth + 1);
+
+    // 汇总收集所有的叶子节点（独立的单指）
+    result1.insert(result1.end(), result2.begin(), result2.end());
+    return result1;
+}
 
 CentroidExtractor::CentroidExtractor() {}
 CentroidExtractor::~CentroidExtractor() {}
@@ -174,16 +214,15 @@ bool CentroidExtractor::Process(HeatmapFrame& frame) {
         }
     }
 
-    // 2. Segment each blob
+    // 2. Segment each blob (Using Recursive Hierarchical PCA-KMeans)
     for (const auto& blob : blobs) {
-        std::vector<FingerCenter> centers = TouchSegmenter::analyze_and_segment_blob(blob, frame.heatmapMatrix);
+        // depth 默认从 0 开始
+        std::vector<FingerCenter> centers = TouchSegmenter::analyze_and_segment_blob(blob, frame.heatmapMatrix, 0);
         
         for (const auto& c : centers) {
             TouchContact tc;
             tc.id = touchId++;
             // CalculateGaussianParaboloid handles subpixel resolution. 
-            // In PCA we already have subpixel mean_x and mean_y natively, but we can refine it if strictly requested.
-            // Since PCA handles this incredibly well on its own, we just output it directly.
             float outY = c.y;
             float outX = m_algorithm == 1 ? CalculateGaussianParaboloid(frame, static_cast<int>(std::round(c.x)), static_cast<int>(std::round(c.y)), outY) : c.x;
             
@@ -235,10 +274,11 @@ float CentroidExtractor::CalculateGaussianParaboloid(const HeatmapFrame& frame, 
 }
 
 void CentroidExtractor::DrawConfigUI() {
-    ImGui::TextWrapped("PCA-KMeans Algorithm for Smart Centroid Extraction:");
+    ImGui::TextWrapped("Hierarchical PCA-KMeans Extractor (Supports 3+ Fingers):");
     ImGui::RadioButton("Native PCA Weight Centroid", &m_algorithm, 0);
     ImGui::RadioButton("2D Paraboloid Refinement", &m_algorithm, 1);
     
+    // 这里的默认值建议在初始化时改为 80，保证滑动的灵敏度
     ImGui::SliderInt("Peak Detection Threshold", &m_peakThreshold, 50, 2000);
 }
 

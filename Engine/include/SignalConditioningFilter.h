@@ -17,6 +17,18 @@ public:
     std::string GetName() const override { return "Signal Conditioning (IIR + Clip)"; }
 
     void DrawConfigUI() override;
+    
+    void SaveConfig(std::ostream& out) const override {
+        IFrameProcessor::SaveConfig(out);
+        out << "Alpha=" << m_alpha << "\n";
+        out << "NoiseFloor=" << m_noiseFloor << "\n";
+    }
+    
+    void LoadConfig(const std::string& key, const std::string& value) override {
+        IFrameProcessor::LoadConfig(key, value);
+        if (key == "Alpha") m_alpha = std::stoi(value);
+        else if (key == "NoiseFloor") m_noiseFloor = std::stoi(value);
+    }
 
 private:
     int16_t m_historyData[40 * 60];

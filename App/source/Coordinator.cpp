@@ -1,12 +1,10 @@
 #include "Coordinator.h"
 #include "Logger.h"
-#include "DynamicDeadzoneFilter.h"
-#include "SignalConditioningFilter.h"
-#include "GaussianFilter.h"
-#include "SpatialSharpenFilter.h"
-#include "SignalSegmenter.h"
-#include "SignalSegmenter.h"
-#include "CentroidExtractor.h"
+#include "MasterFrameParser.h"
+#include "BaselineSubtraction.h"
+#include "CMFProcessor.h"
+#include "GridIIRProcessor.h"
+#include "FeatureExtractor.h"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -28,14 +26,11 @@ Coordinator::Coordinator() {
     // Initialise Engine Pipeline
     m_pipeline.AddProcessor(std::make_unique<Engine::MasterFrameParser>());
     m_pipeline.AddProcessor(std::make_unique<Engine::BaselineSubtraction>());
-    m_pipeline.AddProcessor(std::make_unique<Engine::DynamicDeadzoneFilter>());
-    m_pipeline.AddProcessor(std::make_unique<Engine::SignalConditioningFilter>());
-    // m_pipeline.AddProcessor(std::make_unique<Engine::GaussianFilter>()); // Removed temporarily to test aggressive peaks
+    m_pipeline.AddProcessor(std::make_unique<Engine::CMFProcessor>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::GridIIRProcessor>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::FeatureExtractor>());
+    // m_pipeline.AddProcessor(std::make_unique<Engine::CentroidExtractor>());
 
-    // Unsharp masking filter to separate highly merged fingers *before* extraction
-    m_pipeline.AddProcessor(std::make_unique<Engine::SpatialSharpenFilter>());
-    m_pipeline.AddProcessor(std::make_unique<Engine::SignalSegmenter>());
-    m_pipeline.AddProcessor(std::make_unique<Engine::CentroidExtractor>());
     
     // Load config on startup
     LoadConfig();
@@ -284,7 +279,13 @@ void Coordinator::LoadConfig() {
         if (pos != std::string::npos && currentProcessor) {
             std::string key = line.substr(0, pos);
             std::string val = line.substr(pos + 1);
-            currentProcessor->LoadConfig(key, val);
+            
+            // Explicitly handle "Enabled" since it's in the base class IFrameProcessor
+            if (key == "Enabled") {
+                currentProcessor->SetEnabled(val == "1" || val == "true");
+            } else {
+                currentProcessor->LoadConfig(key, val);
+            }
         }
     }
     in.close();

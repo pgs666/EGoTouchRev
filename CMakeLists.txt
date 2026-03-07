@@ -69,11 +69,12 @@ add_library(Engine STATIC
     Engine/source/MasterFrameParser.cpp
     Engine/source/BaselineSubtraction.cpp
     Engine/source/FramePipeline.cpp
-    Engine/source/DynamicDeadzoneFilter.cpp
+    Engine/source/CMFProcessor.cpp
+    Engine/source/GridIIRProcessor.cpp
     Engine/source/SignalConditioningFilter.cpp
     Engine/source/GaussianFilter.cpp
     Engine/source/SpatialSharpenFilter.cpp
-    Engine/source/SignalSegmenter.cpp
+    Engine/source/FeatureExtractor.cpp
     Engine/source/CentroidExtractor.cpp
     ${ENGINE_HEADERS}
 )

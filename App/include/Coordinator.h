@@ -5,13 +5,11 @@
 #include <thread>
 #include <atomic>
 #include <memory>
-#include <vector>
+#include <mutex>
 
 // Engine Includes
 #include "EngineTypes.h"
 #include "FramePipeline.h"
-#include "MasterFrameParser.h"
-#include "BaselineSubtraction.h"
 
 namespace App {
 

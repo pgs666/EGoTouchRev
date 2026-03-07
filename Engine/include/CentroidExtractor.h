@@ -1,8 +1,6 @@
 #pragma once
 #include "IFrameProcessor.h"
 #include <vector>
-#include <cmath>
-#include <algorithm>
 
 namespace Engine {
 

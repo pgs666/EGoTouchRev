@@ -1,6 +1,6 @@
 #include "DiagnosticUI.h"
 #include "HimaxChip.h"
-#include "SignalSegmenter.h"
+#include "FeatureExtractor.h"
 #include "imgui.h"
 #include "Logger.h"
 #include "Logger.h"
@@ -9,7 +9,6 @@
 #include <sstream>
 #include <chrono>
 #include <filesystem>
-#include <thread>
 
 namespace App {
 
@@ -24,6 +23,14 @@ void DiagnosticUI::Render() {
     // 拉取最新的数据
     if (m_autoRefresh && m_coordinator) {
         m_coordinator->GetLatestFrame(m_currentFrame);
+    }
+
+    // Keyboard Hotkeys
+    if (ImGui::IsKeyPressed(ImGuiKey_F11)) {
+        m_fullscreen = !m_fullscreen;
+    }
+    if (m_fullscreen && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        m_fullscreen = false;
     }
 
     // 绘制控制面板和热力图窗口
@@ -185,15 +192,26 @@ void DiagnosticUI::DrawControlPanel() {
 
 void DiagnosticUI::DrawHeatmap() {
     ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoScrollbar;
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
 
     if (m_fullscreen) {
-        // Fullscreen disabled logic or replaced logic since Main Window is hidden
-        // Can be kept as is, but users should just maximize the loose viewport window manually now.
+        // True Fullscreen: Set window to cover the PRIMARY monitor (usually at 0,0)
+        // This avoids the issue where GetMainViewport() is at (-10000, -10000) because the main window is hidden.
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        
+        // Use PlatformIO to get actual monitor size if possible, otherwise fall back to large enough size
+        ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+        if (platform_io.Monitors.Size > 0) {
+            ImGui::SetNextWindowSize(platform_io.Monitors[0].MainSize);
+        } else {
+            ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        }
+        
+        window_flags |= ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+    } else {
+        ImGui::SetNextWindowPos(ImVec2(550, 100), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(600, 800), ImGuiCond_FirstUseEver);
     }
 
-    ImGui::SetNextWindowPos(ImVec2(550, 100), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(600, 800), ImGuiCond_FirstUseEver);
     ImGui::Begin("Raw Heatmap Visualization (40x60)", nullptr, window_flags);
     
     // In multi-viewport mode, if the window is outside, GetContentRegionAvail might refer to its own OS window
@@ -224,23 +242,27 @@ void DiagnosticUI::DrawHeatmap() {
             // Mirror Matrix: Left becomes Right, Top becomes Bottom
             int16_t val = m_currentFrame.heatmapMatrix[rows - 1 - y][cols - 1 - x];
             
-            // 值映射 (使用用户界面可调的最大量程)
-            float normalized = std::clamp(val / m_colorRange, 0.0f, 1.0f);
+            // Bipolar mapping (Diverging Color Scale)
+            // positive: black -> blue -> green -> yellow -> red
+            // negative: black -> purple -> cyan
+            float normalized = std::clamp(val / m_colorRange, -1.0f, 1.0f);
             
-            // 使用更平滑的多段插值 (如 Jet 或 Turbo 极简近似映射) 替代简单的 4 段线性插值
-            // 这将最大化利用 ImU32 的 8位单通道精度 (共约 1677 万色)
             ImVec4 colorVec;
-            if (normalized <= 0.0f) {
-                // Background Base Noise -> Absolute Black
+            if (normalized == 0.0f) {
                 colorVec = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+            } else if (normalized > 0.0f) {
+                // Positive signal: Jet-like (warm)
+                float v = normalized * 4.0f;
+                float r = std::clamp(std::min(v - 1.5f, -v + 4.5f), 0.0f, 1.0f);
+                float g = std::clamp(std::min(v - 0.5f, -v + 3.5f), 0.0f, 1.0f);
+                float b = std::clamp(std::min(v + 0.5f, -v + 2.5f), 0.0f, 1.0f);
+                colorVec = ImVec4(r, g, b, 1.0f);
             } else {
-                float r = 0.0f, g = 0.0f, b = 0.0f;
-                // Jet Colormap Approximation
-                // normalized: (0, 1]
-                float fourValue = 4.0f * normalized;
-                r = std::clamp(std::min(fourValue - 1.5f, -fourValue + 4.5f), 0.0f, 1.0f);
-                g = std::clamp(std::min(fourValue - 0.5f, -fourValue + 3.5f), 0.0f, 1.0f);
-                b = std::clamp(std::min(fourValue + 0.5f, -fourValue + 2.5f), 0.0f, 1.0f);
+                // Negative signal: Cold colors
+                float v = (-normalized) * 2.0f; // Scale to [0, 2]
+                float r = std::clamp(v * 0.5f, 0.0f, 0.5f); // subtle purple/dark red
+                float g = std::clamp(v - 1.0f, 0.0f, 1.0f); // cyan mix
+                float b = std::clamp(v, 0.0f, 1.0f);        // blue
                 colorVec = ImVec4(r, g, b, 1.0f);
             }
             
@@ -256,15 +278,17 @@ void DiagnosticUI::DrawHeatmap() {
         }
     }
     
-    // 绘制 Signal Segmenter (Phase 1) 提取到的 Peaks
+    // 绘制 FeatureExtractor (Phase 4.1/4.2) 提取到的 Peaks 和 Zones
     if (m_coordinator) {
         const auto& processors = m_coordinator->GetPipeline().GetProcessors();
         for (const auto& proc : processors) {
-            // Find our SignalSegmenter in the pipeline
-            if (auto segmenter = dynamic_cast<Engine::SignalSegmenter*>(proc.get())) {
-                if (segmenter->IsEnabled()) {
-                    int currentPeakCount = segmenter->GetDebugPeaks().size();
+            // Find our FeatureExtractor in the pipeline
+            if (auto extractor = dynamic_cast<Engine::FeatureExtractor*>(proc.get())) {
+                if (extractor->IsEnabled()) {
+                    const auto& peaks = extractor->GetPeaks();
+                    const auto& zones = extractor->GetTouchZones();
                     
+                    int currentPeakCount = peaks.size();
                     // Auto-Capture logic for N fingers
                     if (m_autoExportTargetPeaks > 0 && 
                         currentPeakCount == m_autoExportTargetPeaks && 
@@ -273,12 +297,57 @@ void DiagnosticUI::DrawHeatmap() {
                     }
                     m_lastPeakCount = currentPeakCount;
 
-                    for (const auto& peak : segmenter->GetDebugPeaks()) {
-                        int pr = peak.first;
-                        int pc = peak.second;
-                        int16_t peakValue = m_currentFrame.heatmapMatrix[pr][pc];
+                    // Draw Touch Zones (Color Outlines)
+                    for (int r = 0; r < rows; ++r) {
+                        for (int c = 0; c < cols; ++c) {
+                            uint8_t zoneId = zones[r * cols + c];
+                            if (zoneId > 0) {
+                                int mirrored_r = rows - 1 - r;
+                                int mirrored_c = cols - 1 - c;
+                                
+                                ImVec2 p_min = ImVec2(canvas_p.x + mirrored_c * cell_w, canvas_p.y + mirrored_r * cell_h);
+                                ImVec2 p_max = ImVec2(p_min.x + cell_w, p_min.y + cell_h);
+                                
+                                // Color based on zone ID (cycle through bright colors)
+                                ImVec4 outlineCol;
+                                switch (zoneId % 6) {
+                                    case 1: outlineCol = ImVec4(1.0f, 0.0f, 0.0f, 1.0f); break; // Red
+                                    case 2: outlineCol = ImVec4(0.0f, 1.0f, 0.0f, 1.0f); break; // Green
+                                    case 3: outlineCol = ImVec4(0.0f, 0.5f, 1.0f, 1.0f); break; // Light Blue
+                                    case 4: outlineCol = ImVec4(1.0f, 0.0f, 1.0f, 1.0f); break; // Magenta
+                                    case 5: outlineCol = ImVec4(0.0f, 1.0f, 1.0f, 1.0f); break; // Cyan
+                                    case 0: outlineCol = ImVec4(1.0f, 0.5f, 0.0f, 1.0f); break; // Orange
+                                }
+                                
+                                ImU32 colU32 = ImGui::ColorConvertFloat4ToU32(outlineCol);
+                                
+                                // Subtle transparent fill
+                                draw_list->AddRectFilled(p_min, p_max, ImGui::ColorConvertFloat4ToU32(ImVec4(outlineCol.x, outlineCol.y, outlineCol.z, 0.2f)));
+
+                                // Draw boundaries only on edges facing a different zone
+                                // Matrix mapping -> Visual mapping Check
+                                bool v_diff_top    = (r == rows - 1) || (zones[(r + 1) * cols + c] != zoneId);
+                                bool v_diff_bottom = (r == 0)        || (zones[(r - 1) * cols + c] != zoneId);
+                                bool v_diff_left   = (c == cols - 1) || (zones[r * cols + (c + 1)] != zoneId);
+                                bool v_diff_right  = (c == 0)        || (zones[r * cols + (c - 1)] != zoneId);
+
+                                float border_thickness = 2.0f;
+                                if (v_diff_top)    draw_list->AddLine(ImVec2(p_min.x, p_min.y), ImVec2(p_max.x, p_min.y), colU32, border_thickness);
+                                if (v_diff_bottom) draw_list->AddLine(ImVec2(p_min.x, p_max.y), ImVec2(p_max.x, p_max.y), colU32, border_thickness);
+                                if (v_diff_left)   draw_list->AddLine(ImVec2(p_min.x, p_min.y), ImVec2(p_min.x, p_max.y), colU32, border_thickness);
+                                if (v_diff_right)  draw_list->AddLine(ImVec2(p_max.x, p_min.y), ImVec2(p_max.x, p_max.y), colU32, border_thickness);
+
+                            }
+                        }
+                    }
+
+                    // Draw Peaks (Crosshairs)
+                    for (const auto& peak : peaks) {
+                        int pr = peak.r;
+                        int pc = peak.c;
+                        int16_t peakValue = peak.z;
                         
-                        // Mirror matrix coordinates exactly like the heatmap loop above
+                        // Mirror matrix coordinates exactly like the heatmap loop
                         int mirrored_r = rows - 1 - pr;
                         int mirrored_c = cols - 1 - pc;
                         
@@ -288,7 +357,7 @@ void DiagnosticUI::DrawHeatmap() {
                         
                         // Draw a prominent Yellow Cross marker
                         ImU32 markerColor = IM_COL32(255, 255, 0, 255); // Yellow
-                        float crossSize = std::min(cell_w, cell_h) * 0.4f; // 80% of cell size
+                        float crossSize = std::min(cell_w, cell_h) * 0.6f; // 120% of cell size to stick out
                         
                         draw_list->AddLine(ImVec2(cx - crossSize, cy), ImVec2(cx + crossSize, cy), markerColor, 2.0f);
                         draw_list->AddLine(ImVec2(cx, cy - crossSize), ImVec2(cx, cy + crossSize), markerColor, 2.0f);
@@ -297,11 +366,11 @@ void DiagnosticUI::DrawHeatmap() {
                         char label[32];
                         snprintf(label, sizeof(label), "%d", peakValue);
                         ImU32 textColor = IM_COL32(255, 255, 255, 255); // White text
-                        ImU32 outlineColor = IM_COL32(0, 0, 0, 255);    // Black outline for contrast
+                        ImU32 outlineColor = IM_COL32(0, 0, 0, 255);    // Black outline
 
-                        ImVec2 textPos(cx + 2.0f, cy + 2.0f);
+                        ImVec2 textPos(cx + 4.0f, cy + 4.0f);
                         
-                        // Draw text outline (shadow) for readability
+                        // Draw text outline (shadow)
                         draw_list->AddText(ImVec2(textPos.x - 1, textPos.y - 1), outlineColor, label);
                         draw_list->AddText(ImVec2(textPos.x + 1, textPos.y - 1), outlineColor, label);
                         draw_list->AddText(ImVec2(textPos.x - 1, textPos.y + 1), outlineColor, label);

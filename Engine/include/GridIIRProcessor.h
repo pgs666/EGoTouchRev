@@ -6,10 +6,10 @@
 
 namespace Engine {
 
-// Grid IIR Processor
-// Replicates TSA's GridIIR_Process as a Temporal Low-pass Filter.
-// Uses an Infinite Impulse Response (IIR) approach on the 2D grid data
-// to smooth out noise across consecutive frames.
+// Grid IIR Processor v2
+// Dynamic threshold gated IIR with aggressive noise floor decay.
+// - High signal (>= dynamicThreshold) bypasses IIR entirely
+// - Low signal gets fast-decay IIR to wash non-touch areas to zero
 class GridIIRProcessor : public IFrameProcessor {
 public:
     GridIIRProcessor();
@@ -20,28 +20,24 @@ public:
 
     void DrawConfigUI() override;
     
-    void SaveConfig(std::ostream& out) const override {
-        IFrameProcessor::SaveConfig(out);
-        out << "IIRWeight=" << m_weight << "\n";
-        out << "AdaptiveThreshold=" << m_adaptiveThreshold << "\n";
-    }
-    
-    void LoadConfig(const std::string& key, const std::string& value) override {
-        IFrameProcessor::LoadConfig(key, value);
-        if (key == "IIRWeight") m_weight = std::stoi(value);
-        if (key == "AdaptiveThreshold") m_adaptiveThreshold = std::stoi(value);
-    }
+    void SaveConfig(std::ostream& out) const override;
+    void LoadConfig(const std::string& key, const std::string& value) override;
 
 private:
-    int m_weight = 120; // 0-256 scale. Equivalent to alpha. Low = high inertia/smoothing.
-    int m_adaptiveThreshold = 15; // If |current - history| > threshold, bypass IIR.
-    
-    // History buffer for the temporal filter
+    // Dynamic Touch Gate
+    float m_gateRatio = 0.10f;       // dynamicThreshold = frameMax * ratio
+    int m_gateStaticFloor = 200;     // Static lower bound for threshold
+
+    // Low-signal decay IIR
+    int m_decayWeight = 200;         // IIR weight for low-signal pixels (0-256)
+    int m_decayStep = 80;            // Extra per-frame subtract for fast zeroing
+    int m_noiseFloorCutoff = 5;      // Hard cutoff: below this → 0
+
+    // History buffer
     bool m_historyInitialized = false;
     int16_t m_historyBuffer[40][60];
 
-    // Core Adaptive IIR math from TSA's AdaptiveIIR_Process
-    int16_t ApplyIIR(int16_t current, int16_t history);
+    int16_t ApplyIIR(int16_t current, int16_t history, int16_t dynThreshold);
 };
 
 } // namespace Engine

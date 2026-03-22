@@ -15,8 +15,8 @@ bool MasterFrameParser::Process(HeatmapFrame& frame) {
     const uint8_t* raw_ptr = frame.rawData.data() + 7;
     int16_t* heat_ptr = reinterpret_cast<int16_t*>(frame.heatmapMatrix); 
 
-    // 使用标准 C++ 循环处理，避免在 x64 和未对齐地址导致的硬件异常
-    // MSVC (O2) 能够很好地将此自动向量化 (AVX/SSE)
+    // 使用标准 C++ 循环处理，避免在 ARM64 和未对齐地址导致的硬件异常
+    // MSVC (O2) 能够很好地将此自动向量化 (NEON)
     for (int i = 0; i < 2400; ++i) {
         // 处理无对齐的小端内存加载
         uint16_t val = static_cast<uint16_t>(raw_ptr[i * 2]) | (static_cast<uint16_t>(raw_ptr[i * 2 + 1]) << 8);

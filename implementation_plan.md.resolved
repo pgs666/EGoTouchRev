@@ -29,13 +29,13 @@
 EGoTouchRev-rebuild/
 ├── App/                         <-- 【入口与调度层】
 │   ├── include/
-│   │   ├── Coordinator.h        # 统管三线程生命周期的“大脑”
-│   │   ├── RingBuffer.h         # 高性能无锁环形队列 (跨线程通信)
-│   │   └── DiagnosticUI.h       # 可视化监控 (原 GUI)
+│   │   ├── RuntimeOrchestrator.h        # 统管三线程生命周期的“大脑”
+│   │   ├── ConcurrentRingBuffer.h         # 高性能无锁环形队列 (跨线程通信)
+│   │   └── DiagnosticsWorkbench.h       # 可视化监控 (原 GUI)
 │   └── source/
 │       ├── main.cpp             # 入口
-│       ├── Coordinator.cpp      # 线程组装和启动逻辑
-│       └── DiagnosticUI.cpp
+│       ├── RuntimeOrchestrator.cpp      # 线程组装和启动逻辑
+│       └── DiagnosticsWorkbench.cpp
 │
 ├── Device/                      <-- 【硬件抽象层】(原 HimaxChipCore)
 │   ├── include/

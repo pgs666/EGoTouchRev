@@ -42,8 +42,8 @@ target_link_libraries(Common PUBLIC spdlog::spdlog)
 
 # --- Device Module (Hardware Abstraction) ---
 set(DEVICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Device")
-file(GLOB DEVICE_SOURCES "${DEVICE_ROOT}/source/*.cpp")
-file(GLOB DEVICE_HEADERS "${DEVICE_ROOT}/include/*.h" "${DEVICE_ROOT}/include/*.hpp")
+file(GLOB_RECURSE DEVICE_SOURCES CONFIGURE_DEPENDS "${DEVICE_ROOT}/source/*.cpp" "${DEVICE_ROOT}/*.cpp")
+file(GLOB_RECURSE DEVICE_HEADERS CONFIGURE_DEPENDS "${DEVICE_ROOT}/include/*.h" "${DEVICE_ROOT}/*.h")
 
 add_library(Device STATIC
     ${DEVICE_SOURCES}
@@ -73,9 +73,9 @@ add_library(Engine STATIC
     Engine/source/GridIIRProcessor.cpp
     Engine/source/SignalConditioningFilter.cpp
     Engine/source/GaussianFilter.cpp
-    Engine/source/SpatialSharpenFilter.cpp
     Engine/source/FeatureExtractor.cpp
-    Engine/source/CentroidExtractor.cpp
+    Engine/source/StylusProcessor.cpp
+    Engine/source/TouchTracker.cpp
     ${ENGINE_HEADERS}
 )
 
@@ -100,6 +100,32 @@ add_library(Host STATIC
 )
 target_include_directories(Host PUBLIC "${HOST_ROOT}/include")
 target_link_libraries(Host PUBLIC Common)
+if (WIN32)
+    target_link_libraries(Host PUBLIC advapi32)
+endif()
+
+# --- Control Module (User-Mode Service Control Plane) ---
+set(CONTROL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Control")
+set(CONTROL_HEADERS
+    "${CONTROL_ROOT}/include/ControlTypes.h"
+    "${CONTROL_ROOT}/include/ControlRuntime.h"
+    "${CONTROL_ROOT}/include/ControlPipeServer.h"
+    "${CONTROL_ROOT}/include/ControlPipeClient.h"
+)
+set(CONTROL_SOURCES
+    "${CONTROL_ROOT}/source/ControlRuntime.cpp"
+    "${CONTROL_ROOT}/source/ControlPipeServer.cpp"
+    "${CONTROL_ROOT}/source/ControlPipeClient.cpp"
+)
+
+add_library(ControlRuntime STATIC
+    ${CONTROL_SOURCES}
+    ${CONTROL_HEADERS}
+)
+target_include_directories(ControlRuntime PUBLIC
+    "${CONTROL_ROOT}/include"
+)
+target_link_libraries(ControlRuntime PUBLIC Host Common)
 
 # --- App Module (Main & ServiceHost) ---
 set(APP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/App")
@@ -125,6 +151,49 @@ target_include_directories(EGoTouchApp PRIVATE
 )
 
 # Link D3D11 for the ImGui DX11 backend
-target_link_libraries(EGoTouchApp PRIVATE Device Engine Host Common d3d11 d3dcompiler dwmapi)
+target_link_libraries(EGoTouchApp PRIVATE Device Engine Host Common d3d11 d3dcompiler dwmapi setupapi)
+
+add_executable(EGoTouchControlService
+    "${CONTROL_ROOT}/app/ControlServiceMain.cpp"
+)
+target_include_directories(EGoTouchControlService PRIVATE
+    "${CONTROL_ROOT}/include"
+)
+target_link_libraries(EGoTouchControlService PRIVATE ControlRuntime Host Common)
+
+add_executable(EGoTouchControlServiceTestTool
+    "${CONTROL_ROOT}/app/ControlServiceTestTool.cpp"
+)
+target_include_directories(EGoTouchControlServiceTestTool PRIVATE
+    "${CONTROL_ROOT}/include"
+)
+target_link_libraries(EGoTouchControlServiceTestTool PRIVATE ControlRuntime user32 gdi32)
+
+# --- BTMCUTool (ImGui BT Protocol Validator) ---
+add_executable(BtMcuTestTool
+    BTMCUTool/BtMcuTestTool.cpp
+    ${IMGUI_BACKEND_SOURCES}
+)
+target_include_directories(BtMcuTestTool PRIVATE
+    "${DEVICE_ROOT}/include"
+    "${COMMON_ROOT}/include"
+    "${IMGUI_ROOT}"
+    "${IMGUI_ROOT}/backends"
+)
+target_link_libraries(BtMcuTestTool PRIVATE Device Common d3d11 d3dcompiler dwmapi setupapi)
+
+option(EGO_BUILD_TESTS "Build local test executables" ON)
+if (EGO_BUILD_TESTS)
+    add_executable(HostSystemStateMonitorTest
+        Host/tests/SystemStateMonitorNamedEventTest.cpp
+    )
+    target_include_directories(HostSystemStateMonitorTest PRIVATE "${HOST_ROOT}/include")
+    target_link_libraries(HostSystemStateMonitorTest PRIVATE Host Common)
+
+    add_executable(EngineRawdataBenchmarkTest
+        Engine/tests/RawdataBenchmarkTest.cpp
+    )
+    target_link_libraries(EngineRawdataBenchmarkTest PRIVATE Engine Common)
+endif()
 
 

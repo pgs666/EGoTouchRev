@@ -2,6 +2,7 @@
 #include "imgui.h"
 #include <algorithm>
 #include <cstring>
+#include <cmath>
 
 namespace Engine {
 
@@ -13,21 +14,32 @@ bool GridIIRProcessor::Process(HeatmapFrame& frame) {
     if (!m_enabled) return true;
 
     if (!m_historyInitialized) {
-        // First frame: Copy to history and skip filtering
         std::memcpy(m_historyBuffer, frame.heatmapMatrix, sizeof(m_historyBuffer));
         m_historyInitialized = true;
         return true;
     }
 
-    // Apply temporal IIR pixel-by-pixel
+    // Compute per-frame dynamic threshold
+    int16_t frameMax = 0;
+    for (int y = 0; y < 40; ++y) {
+        for (int x = 0; x < 60; ++x) {
+            if (frame.heatmapMatrix[y][x] > frameMax) {
+                frameMax = frame.heatmapMatrix[y][x];
+            }
+        }
+    }
+    const int16_t dynThreshold = static_cast<int16_t>(std::max(
+        static_cast<int>(std::lround(frameMax * m_gateRatio)),
+        m_gateStaticFloor));
+
+    // Apply per-pixel
     for (int y = 0; y < 40; ++y) {
         for (int x = 0; x < 60; ++x) {
             int16_t current = frame.heatmapMatrix[y][x];
             int16_t history = m_historyBuffer[y][x];
-            
-            int16_t filtered = ApplyIIR(current, history);
-            
-            // Output filtered result to current frame and update history
+
+            int16_t filtered = ApplyIIR(current, history, dynThreshold);
+
             frame.heatmapMatrix[y][x] = filtered;
             m_historyBuffer[y][x] = filtered;
         }
@@ -36,46 +48,62 @@ bool GridIIRProcessor::Process(HeatmapFrame& frame) {
     return true;
 }
 
-int16_t GridIIRProcessor::ApplyIIR(int16_t current, int16_t history) {
-    // Exact logic from TSA TSACore's AdaptiveIIR_Process
-    // 1. Check if the signal change is "small enough" to be considered noise
-    int32_t delta = std::abs(static_cast<int32_t>(current) - static_cast<int32_t>(history));
-    
-    if (delta >= m_adaptiveThreshold) {
-        // Large change (e.g. finger moving): Bypass filter to avoid ghosting
+int16_t GridIIRProcessor::ApplyIIR(int16_t current, int16_t history,
+                                    int16_t dynThreshold) {
+    // Layer 1: High signal → bypass entirely (protect touch)
+    if (current >= dynThreshold) {
         return current;
     }
 
-    // 2. Perform IIR: IIR_Val = (Weight * Current + (256 - Weight) * History) / 256
-    int32_t val = (static_cast<int32_t>(m_weight) * current + 
-                   (256 - static_cast<int32_t>(m_weight)) * history) / 256;
-    
-    // Applying the rounding/convergence adjustment found in original assembly
-    int16_t adj = 0;
-    if (val < current) {
-        adj = 1;
-    } else if (current < val) {
-        adj = -1;
+    // Layer 2: Low signal → aggressive decay IIR
+    int32_t val = (static_cast<int32_t>(m_decayWeight) * current
+                 + (256 - static_cast<int32_t>(m_decayWeight)) * history) / 256;
+
+    // Extra subtract to accelerate zeroing
+    val = std::max(static_cast<int32_t>(0), val - m_decayStep);
+
+    // Layer 3: Hard cutoff → dead black
+    if (val < m_noiseFloorCutoff) {
+        return 0;
     }
-    
-    return static_cast<int16_t>(val + adj);
+    return static_cast<int16_t>(val);
 }
 
 void GridIIRProcessor::DrawConfigUI() {
-    ImGui::TextWrapped("Adaptive Grid IIR Temporal Filter");
-    ImGui::TextWrapped("Filters small jitters while preserving fast movement.");
-    
-    ImGui::SliderInt("IIR Weight", &m_weight, 1, 256);
-    if (ImGui::IsItemHovered()) 
-        ImGui::SetTooltip("Lower weight = More smoothing (but more lag for small signals).");
+    ImGui::TextWrapped("Grid IIR v2: Dynamic Gate + Fast Decay");
 
-    ImGui::SliderInt("Adaptive Threshold", &m_adaptiveThreshold, 0, 500);
-    if (ImGui::IsItemHovered()) 
-        ImGui::SetTooltip("If signal change > Threshold, IIR is bypassed. Keeps fingers crisp.");
+    ImGui::SeparatorText("Dynamic Touch Gate");
+    ImGui::SliderFloat("Gate Ratio (frameMax *)", &m_gateRatio, 0.02f, 0.30f, "%.2f");
+    ImGui::SliderInt("Gate Static Floor", &m_gateStaticFloor, 50, 500);
+
+    ImGui::SeparatorText("Low-Signal Decay");
+    ImGui::SliderInt("Decay Weight (0-256)", &m_decayWeight, 1, 256);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Higher = more weight on current frame (less smoothing).");
+    ImGui::SliderInt("Decay Step (per-frame)", &m_decayStep, 0, 200);
+    ImGui::SliderInt("Noise Floor Cutoff", &m_noiseFloorCutoff, 0, 20);
 
     if (ImGui::Button("Reset History")) {
         m_historyInitialized = false;
     }
+}
+
+void GridIIRProcessor::SaveConfig(std::ostream& out) const {
+    IFrameProcessor::SaveConfig(out);
+    out << "GateRatio=" << m_gateRatio << "\n";
+    out << "GateStaticFloor=" << m_gateStaticFloor << "\n";
+    out << "DecayWeight=" << m_decayWeight << "\n";
+    out << "DecayStep=" << m_decayStep << "\n";
+    out << "NoiseFloorCutoff=" << m_noiseFloorCutoff << "\n";
+}
+
+void GridIIRProcessor::LoadConfig(const std::string& key, const std::string& value) {
+    IFrameProcessor::LoadConfig(key, value);
+    if (key == "GateRatio") m_gateRatio = std::stof(value);
+    else if (key == "GateStaticFloor") m_gateStaticFloor = std::stoi(value);
+    else if (key == "DecayWeight") m_decayWeight = std::stoi(value);
+    else if (key == "DecayStep") m_decayStep = std::stoi(value);
+    else if (key == "NoiseFloorCutoff") m_noiseFloorCutoff = std::stoi(value);
 }
 
 } // namespace Engine

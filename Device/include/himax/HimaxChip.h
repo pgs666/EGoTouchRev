@@ -82,6 +82,8 @@ namespace Himax {
             alignas(64) std::array<uint8_t, 6000> back_data{};
             THP_INSPECTION_ENUM m_inspection_mode;
             std::atomic<THP_AFE_MODE> afe_mode;
+            StylusState m_stylus;    // 手写笔运行时状态（连接/频点/切换策略）
+
             
             // 主机的连接状态机
             std::atomic<ConnectionState> m_connState{ConnectionState::Unconnected};
@@ -112,5 +114,6 @@ namespace Himax {
             ChipResult<> Deinit(bool check_en = true); // Replaces Stop
             ChipResult<> check_bus(void);
             ChipResult<> GetFrame(void);
+            void CancelPendingFrameRead();
     };
 }

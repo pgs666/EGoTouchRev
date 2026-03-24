@@ -7,6 +7,7 @@
 #include "FeatureExtractor.h"
 #include "StylusProcessor.h"
 #include "TouchTracker.h"
+#include "CoordinateFilter.h"
 #include <SetupAPI.h>
 #include <algorithm>
 #include <chrono>
@@ -55,32 +56,24 @@ inline void WriteU16Le(std::array<uint8_t, 32>& bytes, size_t offset, uint16_t v
     bytes[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
 }
 
+// HID Descriptor (HidInjectorThp.sys): byte[0] per finger = bit0(TipSwitch) | bit1(Confidence)
+// Present (Down/Move): TipSwitch=1, Confidence=1 → 0x03
+// Released (Up):       TipSwitch=0, Confidence=0 → 0x00
 inline uint8_t EncodeVhfContactState(const Engine::TouchContact& c) {
     if (c.state == Engine::TouchStateUp || c.reportEvent == Engine::TouchReportUp) {
-        return 0;
+        return 0x00; // TipSwitch=0, Confidence=0
     }
-    if (c.state == Engine::TouchStateDown || c.reportEvent == Engine::TouchReportDown) {
-        return 2;
-    }
-    return 3;
+    return 0x03;     // TipSwitch=1, Confidence=1 (Down or Move)
 }
 
-inline uint16_t ToVhfX(float gridX, bool flip) {
-    const float xNorm = std::clamp(gridX / 59.0f, 0.0f, 1.0f);
-    const int raw = std::clamp(static_cast<int>(std::lround(xNorm * 1600.0f)), 0, 1600);
-    if (flip) {
-        return static_cast<uint16_t>(std::clamp(raw * 10, 0, 0xFFFF));
-    }
-    return static_cast<uint16_t>(std::clamp(16000 - raw * 10, 0, 0xFFFF));
-}
-
-inline uint16_t ToVhfY(float gridY, bool flip) {
-    const float yNorm = std::clamp(gridY / 39.0f, 0.0f, 1.0f);
-    const int raw = std::clamp(static_cast<int>(std::lround(yNorm * 1600.0f)), 0, 1600);
-    if (flip) {
-        return static_cast<uint16_t>(std::clamp(16000 - raw * 10, 0, 0xFFFF));
-    }
-    return static_cast<uint16_t>(std::clamp(raw * 10, 0, 0xFFFF));
+// Generic grid-to-VHF coordinate conversion.
+// gridValue: raw grid coordinate, gridMax: physical edge (60 or 40)
+// logicalMax: HID logical range maximum (e.g. 16000 for Y, 25600 for X)
+// invert: if true, flip the axis (logicalMax - vhf)
+inline uint16_t ToVhf(float gridValue, float gridMax, float logicalMax, bool invert) {
+    const float norm = std::clamp(gridValue / gridMax, 0.0f, 1.0f);
+    const int vhf = std::clamp(static_cast<int>(std::lround(norm * logicalMax)), 0, static_cast<int>(logicalMax));
+    return static_cast<uint16_t>(invert ? (static_cast<int>(logicalMax) - vhf) : vhf);
 }
 
 RuntimeOrchestrator::RuntimeOrchestrator() {
@@ -98,6 +91,7 @@ RuntimeOrchestrator::RuntimeOrchestrator() {
     m_pipeline.AddProcessor(std::make_unique<Engine::FeatureExtractor>());
     m_pipeline.AddProcessor(std::make_unique<Engine::StylusProcessor>());
     m_pipeline.AddProcessor(std::make_unique<Engine::TouchTracker>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::CoordinateFilter>());
     // m_pipeline.AddProcessor(std::make_unique<Engine::CentroidExtractor>());
 
     ResetAutoAfeFreqShiftSyncState();
@@ -201,12 +195,43 @@ ChipResult<> RuntimeOrchestrator::SwitchAfeMode(AFE_Command cmd, uint8_t param) 
     return {};
 }
 
+ChipResult<> RuntimeOrchestrator::SafeDeinit() {
+    if (!m_device) {
+        return std::unexpected(ChipError::InternalError);
+    }
+
+    // 1. Stop acquisition so the acquisition thread exits GetFrame().
+    const bool wasAcquiring = m_isAcquiring.exchange(false);
+
+    // 2. Cancel any pending GetFrame I/O via CancelIoEx, then give the
+    //    acquisition thread a short window to process the cancellation.
+    LOG_INFO("App", "RuntimeOrchestrator::SafeDeinit", "UI",
+             "Cancelling pending frame I/O (wasAcquiring={})...", wasAcquiring);
+    m_device->CancelPendingFrameRead();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // 3. Now it is safe to tear down the hardware channels.
+    auto res = m_device->Deinit();
+
+    // 4. Reset auto-sync state since the device is no longer connected.
+    ResetAutoAfeFreqShiftSyncState();
+
+    return res;
+}
+
 void RuntimeOrchestrator::AcquisitionThreadFunc() {
     LOG_INFO("App", "RuntimeOrchestrator::AcquisitionThreadFunc", "Unknown", "Acquisition Thread started.");
     
+    // FPS 计数: 记录最近 32 帧的时间戳，取首尾差估算帧率
+    static constexpr int FPS_WINDOW = 32;
+    std::array<std::chrono::steady_clock::time_point, FPS_WINDOW> fpsRing{};
+    int fpsHead = 0;
+    int fpsCount = 0;
+
     while (m_running) {
         if (m_device->GetConnectionState() != Himax::ConnectionState::Connected || !m_isAcquiring.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            fpsCount = 0; // 休眠后重置，避免假低帧率
             continue;
         }
 
@@ -214,7 +239,22 @@ void RuntimeOrchestrator::AcquisitionThreadFunc() {
             // Handle error, maybe logging is enough for now as Device does it
             continue;
         }
-        
+
+        // --- FPS 统计 ---
+        const auto now = std::chrono::steady_clock::now();
+        fpsRing[fpsHead] = now;
+        fpsHead = (fpsHead + 1) % FPS_WINDOW;
+        if (fpsCount < FPS_WINDOW) ++fpsCount;
+        if (fpsCount >= 2) {
+            const int oldestIdx = (fpsHead + FPS_WINDOW - fpsCount) % FPS_WINDOW;
+            const auto& oldestTs = fpsRing[oldestIdx];
+            const auto spanUs = std::chrono::duration_cast<std::chrono::microseconds>(now - oldestTs).count();
+            if (spanUs > 0) {
+                const int fps = static_cast<int>(std::llround((fpsCount - 1) * 1'000'000.0 / spanUs));
+                m_acquisitionFps.store(fps);
+            }
+        }
+
         // 提取采集的数据到帧对象
         Engine::HeatmapFrame frame;
         
@@ -224,8 +264,9 @@ void RuntimeOrchestrator::AcquisitionThreadFunc() {
 
         // Push Raw data into Processing Thread
         m_frameBuffer.Push(frame);
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(2)); // Polling Interval
+        // NOTE: No sleep here — SpiGetFrame is interrupt-driven blocking I/O.
+        // The chip fires an interrupt at every frame (120Hz = 8.33ms). Adding any
+        // sleep here would artificially cap FPS below the chip's scan rate.
     }
     LOG_INFO("App", "RuntimeOrchestrator::AcquisitionThreadFunc", "Unknown", "Acquisition Thread stopped.");
 }
@@ -248,6 +289,7 @@ void RuntimeOrchestrator::ProcessingThreadFunc() {
             auto* feature = static_cast<Engine::IFrameProcessor*>(nullptr);
             auto* stylus = static_cast<Engine::IFrameProcessor*>(nullptr);
             auto* touchTracker = static_cast<Engine::IFrameProcessor*>(nullptr);
+            auto* coordFilter = static_cast<Engine::IFrameProcessor*>(nullptr);
 
             for (const auto& p : m_pipeline.GetProcessors()) {
                 if (!masterParser && dynamic_cast<Engine::MasterFrameParser*>(p.get())) { masterParser = p.get(); continue; }
@@ -257,6 +299,7 @@ void RuntimeOrchestrator::ProcessingThreadFunc() {
                 if (!feature && dynamic_cast<Engine::FeatureExtractor*>(p.get())) { feature = p.get(); continue; }
                 if (!stylus && dynamic_cast<Engine::StylusProcessor*>(p.get())) { stylus = p.get(); continue; }
                 if (!touchTracker && dynamic_cast<Engine::TouchTracker*>(p.get())) { touchTracker = p.get(); continue; }
+                if (!coordFilter && dynamic_cast<Engine::CoordinateFilter*>(p.get())) { coordFilter = p.get(); continue; }
             }
 
             auto runProcessor = [](Engine::IFrameProcessor* processor, Engine::HeatmapFrame& inOutFrame) {
@@ -267,6 +310,8 @@ void RuntimeOrchestrator::ProcessingThreadFunc() {
             };
 
             bool ok = true;
+            const auto t_pipeline_start = std::chrono::steady_clock::now();
+
             ok = ok && runProcessor(masterParser, frame);
             ok = ok && runProcessor(baseline, frame);
             ok = ok && runProcessor(cmf, frame);
@@ -282,11 +327,22 @@ void RuntimeOrchestrator::ProcessingThreadFunc() {
                     touchFrame.stylus = stylusFrame.stylus;
                     ok = runProcessor(touchTracker, touchFrame);
                     if (ok) {
-                        touchFrame.stylus = stylusFrame.stylus;
-                        frame = std::move(touchFrame);
+                        ok = runProcessor(coordFilter, touchFrame);
+                        if (ok) {
+                            touchFrame.stylus = stylusFrame.stylus;
+                            frame = std::move(touchFrame);
+                        }
                     }
                 }
             }
+
+            // --- Pipeline latency measurement ---
+            const auto t_pipeline_end = std::chrono::steady_clock::now();
+            const int64_t elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                t_pipeline_end - t_pipeline_start).count();
+            m_lastFrameProcessUs.store(elapsedUs);
+            const int64_t prevAvg = m_avgFrameProcessUs.load();
+            m_avgFrameProcessUs.store(prevAvg + (elapsedUs - prevAvg) / 16);
 
             if (ok) {
                 BuildTouchVhfReports(frame);
@@ -307,12 +363,20 @@ void RuntimeOrchestrator::ProcessingThreadFunc() {
 }
 
 void RuntimeOrchestrator::BuildTouchVhfReports(Engine::HeatmapFrame& frame) const {
+    // HID Descriptor (HidInjectorThp.sys) report layout (Report ID 0x01):
+    //   byte[0]        = Report ID (0x01)
+    //   byte[1..6]     = Finger 0: {flags(1), contactId(1), X_lo(1), X_hi(1), Y_lo(1), Y_hi(1)}
+    //   byte[7..12]    = Finger 1  ... etc up to 5 fingers per packet
+    //   Total = 1 + 5*6 = 31 bytes.  NO ContactCount field in descriptor.
     frame.touchPackets[0] = Engine::TouchPacket{};
     frame.touchPackets[1] = Engine::TouchPacket{};
     frame.touchPackets[0].bytes.fill(0);
     frame.touchPackets[1].bytes.fill(0);
-    frame.touchPackets[0].bytes[0] = frame.touchPackets[0].reportId;
-    frame.touchPackets[1].bytes[0] = frame.touchPackets[1].reportId;
+    frame.touchPackets[0].bytes[0] = frame.touchPackets[0].reportId; // 0x01
+    frame.touchPackets[1].bytes[0] = frame.touchPackets[1].reportId; // 0x01
+    // Keep length = 32 (0x20): driver HidWrite_EvtIoWrite requires exactly 0x20 bytes.
+    // byte[31] stays 0 via fill(0) above — no ContactCount field in HID descriptor,
+    // so the zero padding is safe and eliminates the previous ghost touch at (0,0)/ID=128.
 
     std::vector<const Engine::TouchContact*> reportable;
     reportable.reserve(frame.contacts.size());
@@ -324,7 +388,11 @@ void RuntimeOrchestrator::BuildTouchVhfReports(Engine::HeatmapFrame& frame) cons
     }
 
     const size_t count = std::min<size_t>(10, reportable.size());
-    frame.touchPackets[0].bytes[31] = static_cast<uint8_t>(count & 0xFFu);
+    // byte[31] = ContactCount (HID Usage 0x54) — the descriptor ends with this field.
+    // Windows HID Hybrid Mode: first packet carries the TOTAL contact count,
+    // subsequent packets carry 0 (OS already knows the total from packet 0).
+    frame.touchPackets[0].bytes[31] = static_cast<uint8_t>(count);
+    // frame.touchPackets[1].bytes[31] stays 0 (fill(0) above)
 
     const bool flip = m_vhfTransposeEnabled.load();
     for (size_t i = 0; i < count; ++i) {
@@ -334,15 +402,44 @@ void RuntimeOrchestrator::BuildTouchVhfReports(Engine::HeatmapFrame& frame) cons
         const size_t base = 1 + slot * 6;
         auto& bytes = frame.touchPackets[packetIndex].bytes;
 
-        bytes[base] = EncodeVhfContactState(c);
+        bytes[base]     = EncodeVhfContactState(c);  // bit0=TipSwitch, bit1=Confidence
         bytes[base + 1] = static_cast<uint8_t>(std::clamp(c.id, 0, 255));
-        WriteU16Le(bytes, base + 2, ToVhfX(c.x, flip));
-        WriteU16Le(bytes, base + 4, ToVhfY(c.y, flip));
+        // HID descriptor: X LogMax=16000, Y LogMax=25600
+        // Physical: grid col 0..60 → X, row 0..40 → Y
+        const bool invertX = !flip;
+        const bool invertY = flip;
+        WriteU16Le(bytes, base + 2, ToVhf(c.y, 40.0f, 16000.0f, invertY));  // byte[2-3] = X slot
+        WriteU16Le(bytes, base + 4, ToVhf(c.x, 60.0f, 25600.0f, invertX));  // byte[4-5] = Y slot
     }
 
     frame.touchPackets[0].valid = (count > 0);
     frame.touchPackets[1].valid = (count > 5);
+
+    // Always log Up events immediately (unthrottled) for diagnostics
+    for (const auto& c : frame.contacts) {
+        if (c.state == Engine::TouchStateUp) {
+            LOG_INFO("App", "BuildTouchVhfReports", "VHF",
+                "[UP] id={} isReported={} x={:.1f} y={:.1f} reportEvent={}",
+                c.id, c.isReported, c.x, c.y, (int)c.reportEvent);
+        }
+    }
+
+    // Diagnostic: log contact state every 60 frames
+    static int s_logCounter = 0;
+    if (++s_logCounter >= 60) {
+        s_logCounter = 0;
+        LOG_INFO("App", "BuildTouchVhfReports", "VHF",
+            "contacts={} reportable={} valid={}",
+            frame.contacts.size(), reportable.size(), count);
+        for (size_t i = 0; i < std::min<size_t>(frame.contacts.size(), 3); ++i) {
+            const auto& c = frame.contacts[i];
+            LOG_INFO("App", "BuildTouchVhfReports", "VHF",
+                "  [{}] id={} state={} isReported={} x={:.1f} y={:.1f}",
+                i, c.id, (int)c.state, c.isReported, c.x, c.y);
+        }
+    }
 }
+
 
 uint8_t RuntimeOrchestrator::MapPenEventToAck(uint8_t eventCode, bool* outKnown) {
     if (outKnown) {
@@ -510,8 +607,21 @@ void RuntimeOrchestrator::DispatchVhfReports(Engine::HeatmapFrame& frame) {
     const bool hasTouchPacket = frame.touchPackets[0].valid || frame.touchPackets[1].valid;
     const bool hasStylusPacket = frame.stylus.packet.valid;
     if (!hasTouchPacket && !hasStylusPacket) {
+        // Send an explicit "all fingers up" packet (ContactCount=0) when transitioning
+        // from having touches to none. Windows shell requires this to finalize tap/click.
+        if (m_vhfHadTouchLastFrame.exchange(false)) {
+            std::lock_guard<std::mutex> lock(m_vhfMutex);
+            if (EnsureVhfDeviceOpenLocked()) {
+                Engine::TouchPacket allUp{};
+                allUp.bytes.fill(0);
+                allUp.bytes[0] = 0x01;  // ReportID
+                // byte[31] = ContactCount = 0  (already 0)
+                WriteVhfPacketLocked(allUp.bytes.data(), allUp.length, "touch-all-up");
+            }
+        }
         return;
     }
+    m_vhfHadTouchLastFrame.store(true);
 
     std::lock_guard<std::mutex> lock(m_vhfMutex);
     if (!EnsureVhfDeviceOpenLocked()) {
@@ -580,6 +690,8 @@ bool RuntimeOrchestrator::EnsureVhfDeviceOpenLocked() {
         if (handle != INVALID_HANDLE_VALUE) {
             m_vhfDeviceHandle = handle;
             opened = true;
+            LOG_INFO("App", "RuntimeOrchestrator::EnsureVhfDeviceOpenLocked", "VHF",
+                     "VHF device opened.");
             break;
         }
     }

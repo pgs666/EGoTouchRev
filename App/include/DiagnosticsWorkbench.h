@@ -38,6 +38,11 @@ private:
     bool m_renderVisualization = true;
     bool m_showTouchDebugPanel = true;
     bool m_showStylusDebugPanel = true;
+    bool m_showTouchSolverPanel = true;
+    bool m_showTouchTrackingPanel = true;
+    bool m_showStylusControlPanel = false;
+    bool m_showMasterSuffixTable = true;
+    bool m_showSlaveSuffixTable = true;
     bool m_fullscreen = false;
     int m_heatmapScale = 10;
     float m_colorRange = 1000.0f;
@@ -56,6 +61,7 @@ private:
     int m_afeClearStatusParam = 1;
     int m_afeForceFreqIdx = 0;
     int m_afeForceScanRateIdx = 0;
+    bool m_scanRateIs240Hz = false; // 当前 ScanRate 目标（false=120Hz, true=240Hz）
     std::string m_lastAfeActionStatus = "No command sent";
 };
 

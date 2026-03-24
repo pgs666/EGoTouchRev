@@ -4,6 +4,13 @@ project(EGoTouchRev VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# --- Platform compatibility ---
+# Prevent Windows.h from defining min/max macros that conflict with std::min/std::max
+# Suppress MSVC CRT deprecation warnings (e.g. localtime -> localtime_s)
+if (WIN32)
+    add_compile_definitions(NOMINMAX _CRT_SECURE_NO_WARNINGS)
+endif()
+
 # --- SIMD options ---
 # This project targets a specific platform; enable NEON by default.
 option(HIMAX_ENABLE_NEON "Enable ARM NEON intrinsics when available" ON)
@@ -42,8 +49,8 @@ target_link_libraries(Common PUBLIC spdlog::spdlog)
 
 # --- Device Module (Hardware Abstraction) ---
 set(DEVICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Device")
-file(GLOB_RECURSE DEVICE_SOURCES CONFIGURE_DEPENDS "${DEVICE_ROOT}/source/*.cpp" "${DEVICE_ROOT}/*.cpp")
-file(GLOB_RECURSE DEVICE_HEADERS CONFIGURE_DEPENDS "${DEVICE_ROOT}/include/*.h" "${DEVICE_ROOT}/*.h")
+file(GLOB_RECURSE DEVICE_SOURCES "${DEVICE_ROOT}/source/*.cpp" "${DEVICE_ROOT}/*.cpp")
+file(GLOB_RECURSE DEVICE_HEADERS "${DEVICE_ROOT}/include/*.h" "${DEVICE_ROOT}/*.h")
 
 add_library(Device STATIC
     ${DEVICE_SOURCES}
@@ -62,31 +69,41 @@ target_link_libraries(Device PUBLIC Common)
 
 # --- Engine Module (Touch Algorithm) ---
 set(ENGINE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Engine")
-file(GLOB ENGINE_SOURCES "${ENGINE_ROOT}/source/*.cpp")
-file(GLOB ENGINE_HEADERS "${ENGINE_ROOT}/include/*.h")
 
 add_library(Engine STATIC
-    Engine/source/MasterFrameParser.cpp
-    Engine/source/BaselineSubtraction.cpp
-    Engine/source/FramePipeline.cpp
-    Engine/source/CMFProcessor.cpp
-    Engine/source/GridIIRProcessor.cpp
-    Engine/source/SignalConditioningFilter.cpp
-    Engine/source/GaussianFilter.cpp
-    Engine/source/FeatureExtractor.cpp
-    Engine/source/StylusProcessor.cpp
-    Engine/source/TouchTracker.cpp
-    ${ENGINE_HEADERS}
+    # Root (Infrastructure)
+    Engine/FramePipeline.cpp
+    # Preprocessing
+    Engine/Preprocessing/MasterFrameParser.cpp
+    Engine/Preprocessing/BaselineSubtraction.cpp
+    Engine/Preprocessing/CMFProcessor.cpp
+    Engine/Preprocessing/GridIIRProcessor.cpp
+    Engine/Preprocessing/SignalConditioningFilter.cpp
+    Engine/Preprocessing/GaussianFilter.cpp
+    # TouchSolver
+    Engine/TouchSolver/PeakDetector.cpp
+    Engine/TouchSolver/ZoneExpander.cpp
+    Engine/TouchSolver/EdgeCompensation.cpp
+    Engine/TouchSolver/TouchSize.cpp
+    Engine/TouchSolver/EdgeRejection.cpp
+    Engine/TouchSolver/CoordinateFilter.cpp
+    Engine/TouchSolver/FeatureExtractor.cpp
+    # Reporting
+    Engine/Reporting/StylusProcessor.cpp
+    Engine/Reporting/TouchTracker.cpp
 )
 
-# ARM NEON is part of the standard ARM64 instruction set on MSVC.
-# We ensure the defines are passed if conditionally required.
 target_compile_definitions(Engine PUBLIC
     $<$<BOOL:${HIMAX_ENABLE_NEON}>:HIMAX_ENABLE_NEON=1>
     $<$<NOT:$<BOOL:${HIMAX_ENABLE_NEON}>>:HIMAX_ENABLE_NEON=0>
 )
 
-target_include_directories(Engine PUBLIC "${ENGINE_ROOT}/include")
+target_include_directories(Engine PUBLIC
+    "${ENGINE_ROOT}"
+    "${ENGINE_ROOT}/Preprocessing"
+    "${ENGINE_ROOT}/TouchSolver"
+    "${ENGINE_ROOT}/Reporting"
+)
 target_link_libraries(Engine PUBLIC Common)
 
 # --- Host Module (System Integration) ---
@@ -161,7 +178,20 @@ target_include_directories(EGoTouchControlService PRIVATE
 )
 target_link_libraries(EGoTouchControlService PRIVATE ControlRuntime Host Common)
 
-add_executable(EGoTouchControlServiceTestTool
+# --- EGoTouchService (New Service Shell) ---
+set(SERVICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/EGoTouchService")
+
+add_executable(EGoTouchService
+    "${SERVICE_ROOT}/source/ServiceEntry.cpp"
+    "${SERVICE_ROOT}/source/ServiceShell.cpp"
+    "${SERVICE_ROOT}/source/ServiceHost.cpp"
+)
+target_include_directories(EGoTouchService PRIVATE
+    "${SERVICE_ROOT}/include"
+)
+target_link_libraries(EGoTouchService PRIVATE Host Common advapi32)
+
+add_executable(EGoTouchControlServiceTestTool WIN32
     "${CONTROL_ROOT}/app/ControlServiceTestTool.cpp"
 )
 target_include_directories(EGoTouchControlServiceTestTool PRIVATE

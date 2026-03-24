@@ -32,6 +32,7 @@ public:
     
     // GUI 交互接口，用于手动控制芯片
     Himax::Chip* GetDevice() { return m_device.get(); }
+    ChipResult<> SafeDeinit();   // Thread-safe deinit: stops acquisition first
     ChipResult<> SwitchAfeMode(AFE_Command cmd, uint8_t param = 0);
     
     // 注入供 GUI 使用的最新热力图引用
@@ -62,6 +63,12 @@ public:
     // 全局参数配置加载与保存
     void SaveConfig();
     void LoadConfig();
+
+    // Pipeline latency statistics (μs) — atomic, safe for UI thread read
+    int64_t GetLastFrameProcessUs() const { return m_lastFrameProcessUs.load(); }
+    int64_t GetAvgFrameProcessUs()  const { return m_avgFrameProcessUs.load(); }
+    // GetFrame 采集帧率（单位：Hz，测量长度 32 帧平均）
+    int     GetAcquisitionFps()     const { return m_acquisitionFps.load(); }
 
     /**
      * @brief 触发回放数据导出 (Replay/DVR Export)
@@ -95,6 +102,12 @@ private:
 private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isAcquiring{false};
+
+    // Pipeline latency stats (μs)
+    std::atomic<int64_t> m_lastFrameProcessUs{0};
+    std::atomic<int64_t> m_avgFrameProcessUs{0};
+    // GetFrame 采集帧率
+    std::atomic<int>     m_acquisitionFps{0};
     
     // Modules
     std::unique_ptr<Himax::Chip> m_device;
@@ -141,6 +154,7 @@ private:
     // VHF/HID injector state.
     std::atomic<bool> m_vhfReportingEnabled{true};
     std::atomic<bool> m_vhfTransposeEnabled{false};
+    std::atomic<bool> m_vhfHadTouchLastFrame{false}; // for sending explicit all-up packet
     mutable std::mutex m_vhfMutex;
     HANDLE m_vhfDeviceHandle = INVALID_HANDLE_VALUE;
 };

@@ -837,15 +837,30 @@ ChipResult<> Chip::Init(void) {
         return res;
     }
 
+    // 标记连接就绪（后续 AFE 命令检查此状态）
     m_connState.store(ConnectionState::Connected);
+
+    // 强制芯片切换到 120Hz 扫描率（cmd=0x0E, val=0x00）
+    // 确保上电后不处于芯片默认的低帧率或未知模式
+    if (auto res = thp_afe_force_to_scan_rate(0x00); !res) {
+        LOG_WARN("Device", "Chip::Init", GetStateStr(),
+                 "force_to_scan_rate(120Hz) failed (non-fatal), chip may use default rate");
+    } else {
+        LOG_INFO("Device", "Chip::Init", GetStateStr(), "Scan rate forced to 120Hz.");
+    }
+
     LOG_INFO("Device", "Chip::Init", GetStateStr(), "Initialization and Sense ON successful.");
     return {};
 }
 
 ChipResult<> Chip::Deinit(bool check_en) {
+    // CRITICAL: Mark disconnected FIRST so that other threads (acquisition, processing)
+    // immediately stop accessing the device.  Their GetConnectionState() checks will
+    // fail before we tear down the channels below.
+    m_connState.store(ConnectionState::Unconnected);
     LOG_INFO("Device", "Chip::Deinit", GetStateStr(), "Starting Deinit sequence...");
 
-    // Important: send sense off if bus is accessible
+    // Send sense off if bus is accessible
     auto resOff = hx_sense_off(check_en);
     if (!resOff) {
         LOG_WARN("Device", "Chip::Deinit", GetStateStr(), "hx_sense_off had issues during Deinit.");
@@ -858,7 +873,6 @@ ChipResult<> Chip::Deinit(bool check_en) {
          LOG_WARN("Device", "Chip::Deinit", GetStateStr(), "IntClose had issues during Deinit.");
     }
     
-    m_connState.store(ConnectionState::Unconnected);
     LOG_INFO("Device", "Chip::Deinit", GetStateStr(), "Deinit successful.");
     return {};
 }
@@ -871,7 +885,7 @@ Chip::~Chip() {
 }
 
 bool isFingerDetected(void) {
-    
+    return false; // TODO: implement finger detection from back_data
 }
 
 ChipResult<> Chip::GetFrame(void) {
@@ -895,8 +909,8 @@ ChipResult<> Chip::GetFrame(void) {
 
     if (afe_mode.load() == THP_AFE_MODE::Idle) {
         if (isFingerDetected()) {
-            m_master->SetTimeOut(uint32_t(THP_AFE_MODE::Normal));
-            m_slave->SetTimeOut(uint32_t(THP_AFE_MODE::Normal));
+            (void)m_master->SetTimeOut(uint32_t(THP_AFE_MODE::Normal));
+            (void)m_slave->SetTimeOut(uint32_t(THP_AFE_MODE::Normal));
             afe_mode.store(THP_AFE_MODE::Normal);
         }
     }
@@ -904,4 +918,10 @@ ChipResult<> Chip::GetFrame(void) {
 
     return {};
 }
+
+void Chip::CancelPendingFrameRead() {
+    if (m_master) m_master->CancelPendingIo();
+    if (m_slave)  m_slave->CancelPendingIo();
+}
+
 } // namespace Himax

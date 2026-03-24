@@ -133,7 +133,7 @@ private:
     bool m_reportEdgeJitterHoldEnabled = true;
     int m_reportEdgeJitterSignalThreshold = 120;
     int m_reportEdgeJitterMaxAge = 2;
-    bool m_reportCoordinateFilterEnabled = true;
+    bool m_reportCoordinateFilterEnabled = false;
     float m_reportCoordinateFilterDistThreshold = 1.2f;
     float m_reportCoordinateFilterAlphaSmall = 0.45f;
     float m_reportCoordinateFilterAlphaLarge = 0.80f;

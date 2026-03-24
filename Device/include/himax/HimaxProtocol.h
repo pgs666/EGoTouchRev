@@ -38,6 +38,7 @@ namespace Himax {
         ChipResult<> IntClose(void);
         DWORD GetError(void);
         bool IsTimeoutError() const;
+        void CancelPendingIo();
 
     private:
         HANDLE m_handle;

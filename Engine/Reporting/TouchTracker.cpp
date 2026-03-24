@@ -1017,8 +1017,10 @@ bool TouchTracker::Process(HeatmapFrame& frame) {
             if (prevReported || m_emitUnreportedLiftOff) {
                 TouchContact upEvent;
                 upEvent.id = t.id;
-                upEvent.x = t.x;
-                upEvent.y = t.y;
+                // Use last *reported* coordinate so Windows sees lift at the exact
+                // same position it last received — prevents phantom position jumps.
+                upEvent.x = (t.reportFlags & kReportFlagReported) ? t.reportX : t.x;
+                upEvent.y = (t.reportFlags & kReportFlagReported) ? t.reportY : t.y;
                 upEvent.state = TouchStateUp;
                 upEvent.area = t.area;
                 upEvent.signalSum = t.signalSum;

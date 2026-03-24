@@ -171,6 +171,8 @@ namespace Himax {
                 return DeviceIoControl(m_handle, code, (LPVOID)in, inLen, out, outLen, pBytes, pov);
             }, ChipError::CommunicationError, 0, false, (DWORD*)retLen);
             if (result) break;
+            // If the I/O was cancelled via CancelIoEx, do not retry.
+            if (m_lastError == ERROR_OPERATION_ABORTED) break;
         }
 
         return result;
@@ -391,6 +393,12 @@ namespace Himax {
         return m_lastError == WAIT_TIMEOUT ||
                m_lastError == ERROR_TIMEOUT ||
                m_lastError == ERROR_SEM_TIMEOUT;
+    }
+
+    void HalDevice::CancelPendingIo() {
+        if (m_handle != INVALID_HANDLE_VALUE) {
+            CancelIoEx(m_handle, NULL);
+        }
     }
 
     ChipResult<> HimaxProtocol::burst_enable(HalDevice *dev, bool isEnable) {

@@ -38,6 +38,13 @@ bool GridIIRProcessor::Process(HeatmapFrame& frame) {
             int16_t current = frame.heatmapMatrix[y][x];
             int16_t history = m_historyBuffer[y][x];
 
+            // Residual correction: subtract previous-frame ghost
+            if (m_residualEnabled && history > current) {
+                int16_t residual = static_cast<int16_t>(
+                    (history - current) * m_residualAlpha);
+                current = std::max<int16_t>(0, current - residual);
+            }
+
             int16_t filtered = ApplyIIR(current, history, dynThreshold);
 
             frame.heatmapMatrix[y][x] = filtered;
@@ -83,6 +90,14 @@ void GridIIRProcessor::DrawConfigUI() {
     ImGui::SliderInt("Decay Step (per-frame)", &m_decayStep, 0, 200);
     ImGui::SliderInt("Noise Floor Cutoff", &m_noiseFloorCutoff, 0, 20);
 
+    ImGui::SeparatorText("Residual Correction");
+    ImGui::Checkbox("Enable Residual Correction", &m_residualEnabled);
+    if (m_residualEnabled) {
+        ImGui::SliderFloat("Residual Alpha", &m_residualAlpha, 0.0f, 1.0f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("0 = no correction; 1 = fully subtract ghost");
+    }
+
     if (ImGui::Button("Reset History")) {
         m_historyInitialized = false;
     }
@@ -95,6 +110,8 @@ void GridIIRProcessor::SaveConfig(std::ostream& out) const {
     out << "DecayWeight=" << m_decayWeight << "\n";
     out << "DecayStep=" << m_decayStep << "\n";
     out << "NoiseFloorCutoff=" << m_noiseFloorCutoff << "\n";
+    out << "ResidualEnabled=" << (m_residualEnabled?"1":"0") << "\n";
+    out << "ResidualAlpha=" << m_residualAlpha << "\n";
 }
 
 void GridIIRProcessor::LoadConfig(const std::string& key, const std::string& value) {
@@ -104,6 +121,8 @@ void GridIIRProcessor::LoadConfig(const std::string& key, const std::string& val
     else if (key == "DecayWeight") m_decayWeight = std::stoi(value);
     else if (key == "DecayStep") m_decayStep = std::stoi(value);
     else if (key == "NoiseFloorCutoff") m_noiseFloorCutoff = std::stoi(value);
+    else if (key == "ResidualEnabled") m_residualEnabled = (value == "1");
+    else if (key == "ResidualAlpha") m_residualAlpha = std::stof(value);
 }
 
 } // namespace Engine

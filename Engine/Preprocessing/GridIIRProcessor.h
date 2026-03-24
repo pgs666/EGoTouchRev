@@ -33,6 +33,10 @@ private:
     int m_decayStep = 80;            // Extra per-frame subtract for fast zeroing
     int m_noiseFloorCutoff = 5;      // Hard cutoff: below this → 0
 
+    // Residual correction (temporal)
+    bool  m_residualEnabled = false;  // 残留补偿开关
+    float m_residualAlpha   = 0.3f;   // 残留衰减系数 (0=不修正, 1=完全扣除)
+
     // History buffer
     bool m_historyInitialized = false;
     int16_t m_historyBuffer[40][60];

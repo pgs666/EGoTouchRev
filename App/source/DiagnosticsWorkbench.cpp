@@ -7,6 +7,7 @@
 #include "FeatureExtractor.h"
 #include "StylusProcessor.h"
 #include "TouchTracker.h"
+#include "CoordinateFilter.h"
 #include "imgui.h"
 #include "Logger.h"
 #include "Logger.h"
@@ -63,19 +64,21 @@ void DiagnosticsWorkbench::Render() {
 
     // 绘制控制面板和热力图窗口
     DrawControlPanel();
-    DrawTouchSolverPanel();
-    DrawTouchTrackingPanel();
-    DrawStylusControlPanel();
+    if (m_showTouchSolverPanel)   DrawTouchSolverPanel();
+    if (m_showTouchTrackingPanel) DrawTouchTrackingPanel();
+    if (m_showStylusControlPanel) DrawStylusControlPanel();
+    // [TEMPORARILY DISABLED] DrawStylusControlPanel();
     if (m_renderVisualization) {
         DrawHeatmap();
         if (m_showTouchDebugPanel) {
             DrawCoordinateTable();
         }
-        if (m_showStylusDebugPanel) {
-            DrawStylusPanel();
-        }
-        DrawMasterSuffixTable();
-        DrawSlaveSuffixTable();
+        // [TEMPORARILY DISABLED] stylus debug panel
+        // if (m_showStylusDebugPanel) {
+        //     DrawStylusPanel();
+        // }
+        if (m_showMasterSuffixTable) DrawMasterSuffixTable();
+        if (m_showSlaveSuffixTable)  DrawSlaveSuffixTable();
     }
 }
 
@@ -106,8 +109,8 @@ void DiagnosticsWorkbench::DrawControlPanel() {
             ImGui::SameLine();
             if (ImGui::Button("Chip::Deinit")) { // Renamed Disconnect to Deinit for consistency
                 if (connected) {
-                    LOG_INFO("App", "DiagnosticsWorkbench::DrawControlPanel", "UI", "Chip Deinit User Action");
-                    [[maybe_unused]] auto _r = chip->Deinit();
+                    LOG_INFO("App", "DiagnosticsWorkbench::DrawControlPanel", "UI", "Chip SafeDeinit User Action");
+                    [[maybe_unused]] auto _r = m_runtimeOrchestrator->SafeDeinit();
                 }
             }
             
@@ -190,6 +193,27 @@ void DiagnosticsWorkbench::DrawControlPanel() {
                 send_afe_command("ForceToScanRate", AFE_Command::ForceToScanRate, m_afeForceScanRateIdx);
             }
 
+            // --- 120Hz / 240Hz 快速切换 ---
+            ImGui::Separator();
+            {
+                const ImVec4 col120(0.15f, 0.7f, 0.25f, 1.f); // green
+                const ImVec4 col240(0.8f, 0.4f, 0.1f, 1.f);   // orange
+                const char*  label      = m_scanRateIs240Hz ? "Switch to 120 Hz" : "Switch to 240 Hz";
+                const ImVec4 btnColor   = m_scanRateIs240Hz ? col120 : col240;
+                const char*  stateLabel = m_scanRateIs240Hz ? "Current: 240 Hz" : "Current: 120 Hz";
+                const ImVec4 stateColor = m_scanRateIs240Hz ? col240 : col120;
+
+                ImGui::TextColored(stateColor, "%s", stateLabel);
+                ImGui::PushStyleColor(ImGuiCol_Button, btnColor);
+                if (ImGui::Button(label, ImVec2(-1, 0))) {
+                    m_scanRateIs240Hz = !m_scanRateIs240Hz;
+                    const uint8_t rateIdx = m_scanRateIs240Hz ? 1 : 0;
+                    send_afe_command(m_scanRateIs240Hz ? "ScanRate240Hz" : "ScanRate120Hz",
+                                     AFE_Command::ForceToScanRate, rateIdx);
+                }
+                ImGui::PopStyleColor();
+            }
+
             ImGui::TextWrapped("AFE Last Action: %s", m_lastAfeActionStatus.c_str());
             
             if (!connected) ImGui::EndDisabled();
@@ -234,9 +258,14 @@ void DiagnosticsWorkbench::DrawControlPanel() {
     if (!m_runtimeOrchestrator) ImGui::EndDisabled();
 
     ImGui::Separator();
-    ImGui::TextUnformatted("Debug Panels");
-    ImGui::Checkbox("Touch Debug Panel", &m_showTouchDebugPanel);
-    ImGui::Checkbox("Stylus Debug Panel", &m_showStylusDebugPanel);
+    ImGui::TextUnformatted("Window Visibility");
+    ImGui::Checkbox("Touch Solver Panel",   &m_showTouchSolverPanel);
+    ImGui::Checkbox("Touch Tracking Panel", &m_showTouchTrackingPanel);
+    ImGui::Checkbox("Stylus Pipeline Panel",&m_showStylusControlPanel);
+    ImGui::Checkbox("Touch Debug Panel",    &m_showTouchDebugPanel);
+    ImGui::Checkbox("Stylus Debug Panel",   &m_showStylusDebugPanel);
+    ImGui::Checkbox("Master Suffix Table",  &m_showMasterSuffixTable);
+    ImGui::Checkbox("Slave Suffix Table",   &m_showSlaveSuffixTable);
 
     ImGui::Separator();
     
@@ -345,7 +374,8 @@ void DiagnosticsWorkbench::DrawTouchTrackingPanel() {
     bool foundAny = false;
     int id = 2500;
     for (const auto& p : m_runtimeOrchestrator->GetPipeline().GetProcessors()) {
-        if (dynamic_cast<Engine::TouchTracker*>(p.get())) {
+        if (dynamic_cast<Engine::TouchTracker*>(p.get()) ||
+            dynamic_cast<Engine::CoordinateFilter*>(p.get())) {
             DrawProcessorConfigBlock(p.get(), id++);
             foundAny = true;
         }
@@ -356,6 +386,35 @@ void DiagnosticsWorkbench::DrawTouchTrackingPanel() {
 
     if (masterParserOnly) {
         ImGui::EndDisabled();
+    }
+
+    // --- Pipeline Latency Stats ---
+    ImGui::Separator();
+    ImGui::TextUnformatted("Pipeline Latency");
+    if (m_runtimeOrchestrator) {
+        const int64_t lastUs = m_runtimeOrchestrator->GetLastFrameProcessUs();
+        const int64_t avgUs  = m_runtimeOrchestrator->GetAvgFrameProcessUs();
+        const float lastMs = lastUs / 1000.0f;
+        const float avgMs  = avgUs  / 1000.0f;
+
+        auto latencyColor = [](float ms) -> ImVec4 {
+            if (ms < 8.0f)  return ImVec4(0.2f, 0.9f, 0.2f, 1.f); // green
+            if (ms < 16.0f) return ImVec4(1.0f, 0.8f, 0.0f, 1.f); // yellow
+            return             ImVec4(1.0f, 0.3f, 0.3f, 1.f);       // red
+        };
+        ImGui::TextColored(latencyColor(lastMs),
+            "Last frame: %6.0f us  (%.2f ms)", (float)lastUs, lastMs);
+        ImGui::TextColored(latencyColor(avgMs),
+            "Avg  (16f): %6.0f us  (%.2f ms)", (float)avgUs,  avgMs);
+
+        // GetFrame 采集帧率
+        const int fps = m_runtimeOrchestrator->GetAcquisitionFps();
+        auto fpsColor = [](int f) -> ImVec4 {
+            if (f >= 100) return ImVec4(0.2f, 0.9f, 0.2f, 1.f); // green  ≥100Hz
+            if (f >=  50) return ImVec4(1.0f, 0.8f, 0.0f, 1.f); // yellow ≥50Hz
+            return            ImVec4(1.0f, 0.3f, 0.3f, 1.f);     // red    <50Hz
+        };
+        ImGui::TextColored(fpsColor(fps), "GetFrame FPS: %d Hz (32f avg)", fps);
     }
 
     ImGui::End();
@@ -509,8 +568,10 @@ void DiagnosticsWorkbench::DrawHeatmap() {
             // Find our FeatureExtractor in the pipeline
             if (auto extractor = dynamic_cast<Engine::FeatureExtractor*>(proc.get())) {
                 if (extractor->IsEnabled()) {
-                    const auto& peaks = extractor->GetPeaks();
-                    const auto& zones = extractor->GetTouchZones();
+                    // ── Snapshot: 拷贝所有数据，隔绝处理线程 ──
+                    const auto peaks    = extractor->GetPeaks();      // vector copy
+                    const auto zones    = extractor->GetTouchZones(); // array copy
+                    const auto zoneEdge = extractor->GetZoneEdge();   // array copy
                     
                     int currentPeakCount = peaks.size();
                     // Auto-Capture logic for N fingers
@@ -565,6 +626,38 @@ void DiagnosticsWorkbench::DrawHeatmap() {
                         }
                     }
 
+                    // Draw Zone edge visualization
+                    for (int r = 0; r < rows; ++r) {
+                        for (int c = 0; c < cols; ++c) {
+                            int idx = r * cols + c;
+                            int mr = rows - 1 - r, mc = cols - 1 - c;
+                            ImVec2 p0(canvas_p.x + mc*cell_w, canvas_p.y + mr*cell_h);
+                            ImVec2 p1(p0.x + cell_w, p0.y + cell_h);
+
+                            // Zone edge: colored per-side lines
+                            if (zoneEdge[idx] && zones[idx] > 0) {
+                                ImVec4 zC;
+                                switch (zones[idx]%6) {
+                                    case 1: zC={1,.2f,.2f,1}; break;
+                                    case 2: zC={.2f,1,.2f,1}; break;
+                                    case 3: zC={.3f,.6f,1,1}; break;
+                                    case 4: zC={1,.2f,1,1};   break;
+                                    case 5: zC={.2f,1,1,1};   break;
+                                    case 0: zC={1,.6f,.1f,1}; break;
+                                }
+                                ImU32 zCol = ImGui::ColorConvertFloat4ToU32(zC);
+                                uint8_t zid = zones[idx];
+                                auto nz = [&](int ri,int ci)->uint8_t {
+                                    if(ri<0||ri>=rows||ci<0||ci>=cols) return 0;
+                                    return zones[ri*cols+ci];
+                                };
+                                if(nz(r+1,c)!=zid) draw_list->AddLine(p0,{p1.x,p0.y},zCol,2.5f);
+                                if(nz(r-1,c)!=zid) draw_list->AddLine({p0.x,p1.y},p1,zCol,2.5f);
+                                if(nz(r,c+1)!=zid) draw_list->AddLine(p0,{p0.x,p1.y},zCol,2.5f);
+                                if(nz(r,c-1)!=zid) draw_list->AddLine({p1.x,p0.y},p1,zCol,2.5f);
+                            }
+                        }
+                    }
                     // Draw Peaks (Crosshairs)
                     for (const auto& peak : peaks) {
                         int pr = peak.r;
@@ -636,10 +729,12 @@ void DiagnosticsWorkbench::DrawCoordinateTable() {
                              return a->id < b->id;
                          });
 
-        if (ImGui::BeginTable("ContactsTable", 12, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
+        if (ImGui::BeginTable("ContactsTable", 14, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
             ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 40.0f);
             ImGui::TableSetupColumn("X (Sub-pixel)", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("Y (Sub-pixel)", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("ScrX", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+            ImGui::TableSetupColumn("ScrY", ImGuiTableColumnFlags_WidthFixed, 60.0f);
             ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 60.0f);
             ImGui::TableSetupColumn("Area", ImGuiTableColumnFlags_WidthFixed, 70.0f);
             ImGui::TableSetupColumn("SigSum", ImGuiTableColumnFlags_WidthFixed, 80.0f);
@@ -664,26 +759,41 @@ void DiagnosticsWorkbench::DrawCoordinateTable() {
                 ImGui::TableSetColumnIndex(2);
                 ImGui::Text("%.4f", contact.y);
 
+                // Compute VHF screen coordinates (same formula as BuildTouchVhfReports)
+                auto toVhfVal = [](float gridVal, float gridMax, float logMax, bool invert) -> int {
+                    float norm = std::clamp(gridVal / gridMax, 0.0f, 1.0f);
+                    int vhf = std::clamp(static_cast<int>(std::lround(norm * logMax)), 0, static_cast<int>(logMax));
+                    return invert ? (static_cast<int>(logMax) - vhf) : vhf;
+                };
+                const int scrX = toVhfVal(contact.x, 60.0f, 25600.0f, true);   // screenX (2560px)
+                const int scrY = toVhfVal(contact.y, 40.0f, 16000.0f, false);  // screenY (1600px)
+
                 ImGui::TableSetColumnIndex(3);
+                ImGui::Text("%d", scrX);
+
+                ImGui::TableSetColumnIndex(4);
+                ImGui::Text("%d", scrY);
+
+                ImGui::TableSetColumnIndex(5);
                 const char* stateStr = "UNK";
                 if (contact.state == 0) stateStr = "Down";
                 else if (contact.state == 1) stateStr = "Move";
                 else if (contact.state == 2) stateStr = "Up";
                 ImGui::Text("%s", stateStr);
 
-                ImGui::TableSetColumnIndex(4);
+                ImGui::TableSetColumnIndex(6);
                 ImGui::Text("%d", contact.area);
 
-                ImGui::TableSetColumnIndex(5);
+                ImGui::TableSetColumnIndex(7);
                 ImGui::Text("%d", contact.signalSum);
 
-                ImGui::TableSetColumnIndex(6);
+                ImGui::TableSetColumnIndex(8);
                 ImGui::Text("%.2f", contact.sizeMm);
 
-                ImGui::TableSetColumnIndex(7);
+                ImGui::TableSetColumnIndex(9);
                 ImGui::Text("%s", contact.isReported ? "Y" : "N");
 
-                ImGui::TableSetColumnIndex(8);
+                ImGui::TableSetColumnIndex(10);
                 const char* reportEventStr = "UNK";
                 if (contact.reportEvent == Engine::TouchReportIdle) reportEventStr = "Idle";
                 else if (contact.reportEvent == Engine::TouchReportDown) reportEventStr = "Down";
@@ -691,13 +801,13 @@ void DiagnosticsWorkbench::DrawCoordinateTable() {
                 else if (contact.reportEvent == Engine::TouchReportUp) reportEventStr = "Up";
                 ImGui::Text("%s", reportEventStr);
 
-                ImGui::TableSetColumnIndex(9);
+                ImGui::TableSetColumnIndex(11);
                 ImGui::Text("0x%X", static_cast<unsigned int>(contact.lifeFlags));
 
-                ImGui::TableSetColumnIndex(10);
+                ImGui::TableSetColumnIndex(12);
                 ImGui::Text("0x%X", static_cast<unsigned int>(contact.reportFlags));
 
-                ImGui::TableSetColumnIndex(11);
+                ImGui::TableSetColumnIndex(13);
                 ImGui::Text("0x%X", contact.debugFlags);
             }
             ImGui::EndTable();

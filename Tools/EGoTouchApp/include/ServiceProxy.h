@@ -23,9 +23,16 @@ public:
     ServiceProxy& operator=(const ServiceProxy&) = delete;
 
     // Connection lifecycle
-    bool Connect();
+    bool Connect();           // Blocking connect attempt
     void Disconnect();
     bool IsConnected() const;
+
+    // Auto-discovery: background thread retries Connect periodically
+    void StartAutoDiscovery(int intervalMs = 2000);
+    void StopAutoDiscovery();
+
+    // Manual one-shot connect attempt (non-blocking, returns success)
+    bool TryConnect();
 
     // Frame access (reads shared memory)
     bool GetLatestFrame(Engine::HeatmapFrame& out);
@@ -82,6 +89,12 @@ private:
     std::atomic<bool> m_polling{false};
     std::thread m_pollThread;
     void PollLoop();
+
+    // Auto-discovery thread
+    std::atomic<bool> m_discovering{false};
+    std::thread m_discoveryThread;
+    int m_discoveryIntervalMs = 2000;
+    void DiscoveryLoop();
 
     // DVR ring buffer (local)
     std::unique_ptr<RingBuffer<Engine::HeatmapFrame, 480>> m_dvrBuffer;

@@ -96,20 +96,36 @@ void DiagnosticsWorkbench::DrawControlPanel() {
     ImGui::Separator();
     
     if (m_proxy) {
-        // Service 连接状态
+        // ── Service 连接状态 + 手动连接按钮 ──
         bool connected = m_proxy->IsConnected();
-        ImGui::Text("Service Status: %s", connected ? "Connected" : "Disconnected");
+        if (connected) {
+            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.4f, 1.f), "● Service: Connected");
+        } else {
+            ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.f), "● Service: Disconnected");
+            ImGui::TextWrapped("Auto-discovery is running. You can also retry manually:");
+        }
 
         if (connected) {
+            // Disconnect button
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.15f, 0.15f, 1.f));
+            if (ImGui::Button("Disconnect from Service", ImVec2(-1, 0))) {
+                m_proxy->Disconnect();
+            }
+            ImGui::PopStyleColor();
+
+            ImGui::Separator();
+
+            // Start/Stop Runtime
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.f));
             if (ImGui::Button("Stop Runtime", ImVec2(-1, 0))) {
                 m_proxy->StopRemoteRuntime();
             }
             ImGui::PopStyleColor();
         } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.7f, 0.25f, 1.f));
-            if (ImGui::Button("Start Runtime", ImVec2(-1, 0))) {
-                m_proxy->StartRemoteRuntime();
+            // Manual connect button
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.8f, 1.f));
+            if (ImGui::Button("Connect to Service", ImVec2(-1, 0))) {
+                m_proxy->TryConnect();
             }
             ImGui::PopStyleColor();
         }

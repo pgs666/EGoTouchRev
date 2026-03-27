@@ -36,13 +36,9 @@ int main(int, char**)
     Common::Logger::Init("EGoTouch");
     LOG_INFO("App", "wWinMain", "System", "--- EGoTouchApp (DX11) Starts ---");
 
-    // 1. 初始化 ServiceProxy（IPC 连接到 EGoTouchService）
+    // 1. 创建 ServiceProxy（后台自动发现 Service）
     App::ServiceProxy serviceProxy;
-    if (!serviceProxy.Connect()) {
-        LOG_ERROR("App", "wWinMain", "System", "Failed to connect to EGoTouchService.");
-        Common::Logger::Shutdown();
-        return 1;
-    }
+    serviceProxy.StartAutoDiscovery();  // 后台线程定期尝试连接
 
     // 2. 创建 GUI 调试界面对象
     App::DiagnosticsWorkbench diagnosticsWorkbench(&serviceProxy);

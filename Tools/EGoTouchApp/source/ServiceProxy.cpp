@@ -2,6 +2,17 @@
 #include "Logger.h"
 #include "IFrameProcessor.h"
 #include "IpcProtocol.h"
+
+// Pipeline Processors (local copy for GUI parameter editing)
+#include "MasterFrameParser.h"
+#include "BaselineSubtraction.h"
+#include "CMFProcessor.h"
+#include "GridIIRProcessor.h"
+#include "FeatureExtractor.h"
+#include "StylusProcessor.h"
+#include "TouchTracker.h"
+#include "CoordinateFilter.h"
+#include "TouchGestureStateMachine.h"
 #include <chrono>
 #include <fstream>
 #include <string>
@@ -12,9 +23,22 @@
 namespace App {
 
 ServiceProxy::ServiceProxy()
-    : m_dvrBuffer(std::make_unique<RingBuffer<Engine::HeatmapFrame, 480>>()) {}
+    : m_dvrBuffer(std::make_unique<RingBuffer<Engine::HeatmapFrame, 480>>()) {
+    // Build local pipeline (mirrors Service pipeline for GUI config editing)
+    m_pipeline.AddProcessor(std::make_unique<Engine::MasterFrameParser>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::BaselineSubtraction>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::CMFProcessor>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::GridIIRProcessor>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::FeatureExtractor>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::StylusProcessor>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::TouchTracker>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::CoordinateFilter>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::TouchGestureStateMachine>());
+    LoadConfig();
+}
 
 ServiceProxy::~ServiceProxy() {
+    StopAutoDiscovery();
     Disconnect();
 }
 
@@ -65,8 +89,44 @@ void ServiceProxy::Disconnect() {
     }
     m_frameReader.Close();
     m_configDirty.Close();
+    m_fps.store(0);
     LOG_INFO("App", "ServiceProxy::Disconnect", "IPC",
              "Disconnected.");
+}
+
+// ── Auto-discovery ──
+void ServiceProxy::StartAutoDiscovery(int intervalMs) {
+    if (m_discovering.load()) return;
+    m_discoveryIntervalMs = intervalMs;
+    m_discovering.store(true);
+    m_discoveryThread = std::thread(&ServiceProxy::DiscoveryLoop, this);
+    LOG_INFO("App", "ServiceProxy::StartAutoDiscovery", "IPC",
+             "Auto-discovery started (interval={}ms).", intervalMs);
+}
+
+void ServiceProxy::StopAutoDiscovery() {
+    m_discovering.store(false);
+    if (m_discoveryThread.joinable()) m_discoveryThread.join();
+}
+
+bool ServiceProxy::TryConnect() {
+    if (IsConnected()) return true;
+    return Connect();
+}
+
+void ServiceProxy::DiscoveryLoop() {
+    while (m_discovering.load()) {
+        if (!IsConnected()) {
+            if (Connect()) {
+                LOG_INFO("App", "ServiceProxy::DiscoveryLoop", "IPC",
+                         "Service discovered and connected.");
+            }
+        }
+        // Sleep in small increments so we can stop quickly
+        for (int i = 0; i < m_discoveryIntervalMs / 100 && m_discovering.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
 }
 
 bool ServiceProxy::IsConnected() const {
@@ -102,8 +162,12 @@ void ServiceProxy::SaveConfig() {
         p->SaveConfig(out);
         out << "\n";
     }
+    out.close();
+    // Notify Service to reload from config.ini
     m_configDirty.SetDirty();
-    m_client.SaveConfig();
+    m_client.ReloadConfig();
+    LOG_INFO("App", "ServiceProxy::SaveConfig", "Config",
+             "Config saved and Service notified to reload.");
 }
 
 void ServiceProxy::LoadConfig() {

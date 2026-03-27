@@ -22,6 +22,14 @@ bool TouchGestureStateMachine::Process(HeatmapFrame& frame) {
             contactForSlot[idx] = &c;
     }
 
+    // Filter: treat tracker's state=Up contacts as absent.
+    // The state machine is the sole authority on Up lifecycle.
+    // Without this, residual Up contacts trigger spurious PressCandidate.
+    for (int i = 0; i < kMaxSlots; ++i) {
+        if (contactForSlot[i] && contactForSlot[i]->state == TouchStateUp)
+            contactForSlot[i] = nullptr;
+    }
+
     // Phase 1: Update slots.
     for (int i = 0; i < kMaxSlots; ++i) {
         auto& slot = m_slots[i];
@@ -246,13 +254,25 @@ void TouchGestureStateMachine::UpdateSlot(
         slot.missingFrames = 0;
         slot.lastTrackedX = contact->x;
         slot.lastTrackedY = contact->y;
-        // Output stays locked to anchor.
-        slot.lastOutputX = slot.anchorX;
-        slot.lastOutputY = slot.anchorY;
         slot.sizeMm = contact->sizeMm;
         slot.signalSum = contact->signalSum;
         slot.area = contact->area;
         slot.isEdge = contact->isEdge;
+
+        // LongPressHold → Dragging: if finger moves beyond threshold.
+        {
+            const float dx = contact->x - slot.anchorX;
+            const float dy = contact->y - slot.anchorY;
+            if (dx * dx + dy * dy > m_dragThreshold * m_dragThreshold) {
+                slot.phase = GesturePhase::Dragging;
+                slot.lastOutputX = contact->x;
+                slot.lastOutputY = contact->y;
+                return;
+            }
+        }
+        // Otherwise output stays locked to anchor.
+        slot.lastOutputX = slot.anchorX;
+        slot.lastOutputY = slot.anchorY;
         break;
 
     // ----- RELEASE PENDING -----

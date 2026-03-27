@@ -1,6 +1,9 @@
 #include "ServiceHost.h"
 #include "Logger.h"
 #include "IpcProtocol.h"
+#include "IFrameProcessor.h"
+#include <fstream>
+#include <string>
 
 // Engine Pipeline Processors
 #include "MasterFrameParser.h"
@@ -177,8 +180,52 @@ Ipc::IpcResponse ServiceHost::HandleIpcCommand(
         break;
 
     case Ipc::IpcCommand::ReloadConfig:
+        if (m_deviceRuntime) {
+            auto& pl = m_deviceRuntime->GetPipeline();
+            std::ifstream in("config.ini");
+            if (in.is_open()) {
+                std::string line, section;
+                Engine::IFrameProcessor* cur = nullptr;
+                while (std::getline(in, line)) {
+                    if (line.empty() || line[0] == ';') continue;
+                    if (line.front() == '[' && line.back() == ']') {
+                        section = line.substr(1, line.size() - 2);
+                        cur = nullptr;
+                        for (auto& p : pl.GetProcessors()) {
+                            if (p->GetName() == section) {
+                                cur = p.get(); break;
+                            }
+                        }
+                    } else if (cur) {
+                        auto eq = line.find('=');
+                        if (eq != std::string::npos) {
+                            cur->LoadConfig(line.substr(0, eq),
+                                            line.substr(eq + 1));
+                        }
+                    }
+                }
+                resp.success = true;
+                LOG_INFO("ServiceHost", "HandleIpcCommand", "IPC",
+                         "Config reloaded from config.ini.");
+            }
+        }
+        break;
+
     case Ipc::IpcCommand::SaveConfig:
-        resp.success = true;  // placeholder
+        if (m_deviceRuntime) {
+            auto& pl = m_deviceRuntime->GetPipeline();
+            std::ofstream out("config.ini");
+            if (out.is_open()) {
+                for (auto& p : pl.GetProcessors()) {
+                    out << "[" << p->GetName() << "]\n";
+                    p->SaveConfig(out);
+                    out << "\n";
+                }
+                resp.success = true;
+                LOG_INFO("ServiceHost", "HandleIpcCommand", "IPC",
+                         "Config saved to config.ini.");
+            }
+        }
         break;
 
     case Ipc::IpcCommand::SetVhfEnabled:

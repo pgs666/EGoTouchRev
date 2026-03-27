@@ -12,7 +12,7 @@ public:
     ~TouchTracker() override = default;
 
     bool Process(HeatmapFrame& frame) override;
-    std::string GetName() const override { return "Touch Tracker (IDT/TS/TE-lite)"; }
+    std::string GetName() const override { return "Touch Tracker (IDT)"; }
 
     void DrawConfigUI() override;
     void DrawStylusInteropConfigUI();
@@ -21,8 +21,6 @@ public:
 
 private:
     struct TrackState {
-        static constexpr int kPendingHistoryCapacity = 8;
-
         int id = 0;
         float x = 0.0f;
         float y = 0.0f;
@@ -34,44 +32,16 @@ private:
         int age = 0;
         int missed = 0;
         int downDebounceFrames = 0;
-        int liftOffDebounceFrames = 0;
-        int startGatePassCount = 0;
-        int suppressStreak = 0;
         bool upEventEmitted = false;
-        bool reportActive = false;
-        float reportX = 0.0f;
-        float reportY = 0.0f;
-        uint32_t reportFlags = 0;
         int stylusSuppressFrames = 0;
-
-        std::array<float, kPendingHistoryCapacity> pendingX{};
-        std::array<float, kPendingHistoryCapacity> pendingY{};
-        int pendingStart = 0;
-        int pendingCount = 0;
-    };
-
-    struct RecentReleasedTrack {
-        int id = 0;
-        float x = 0.0f;
-        float y = 0.0f;
-        float vx = 0.0f;
-        float vy = 0.0f;
-        int area = 0;
-        int signalSum = 0;
-        float sizeMm = 0.0f;
-        bool wasReported = false;
-        int framesLeft = 0;
     };
 
     static float DistanceSq(float x1, float y1, float x2, float y2);
     static bool IsEdgeTouch(float x, float y, int cols, int rows, float edgeMargin);
     static std::vector<int> SolveAssignment(const std::vector<std::vector<float>>& cost);
-    static void QueuePendingPoint(TrackState& track, float x, float y);
-    static bool PopPendingPoint(TrackState& track, float& outX, float& outY);
 
     float EstimateSizeMm(int area, int signalSum) const;
     int ComputeTouchDownDebounceFrames(const TouchContact& touch) const;
-    int ComputeLiftOffDebounceFrames(const TrackState& track) const;
     int AllocateId(const std::vector<TrackState>& reservedNextTracks) const;
     bool ApplyStylusTouchSuppression(HeatmapFrame& frame);
     bool ResolveStylusAftContext(const HeatmapFrame& frame, float& outStylusX, float& outStylusY);
@@ -81,6 +51,7 @@ private:
     std::vector<TrackState> m_tracks;
     int m_nextIdSeed = 1;
 
+    // ---- IDT core params ----
     int m_maxTouchCount = 20;
     float m_maxTrackDistance = 6.0f;
     float m_alwaysMatchDistance = 2.2f;
@@ -98,10 +69,6 @@ private:
     int m_touchDownRejectMinSignal = 55;
     float m_touchDownRejectMinSizeMm = 0.95f;
     int m_touchDownEdgeRejectMinSignal = 90;
-    int m_liftOffDebounceBaseFrames = 0;
-    int m_liftOffStrongSignalThreshold = 260;
-    float m_liftOffLargeSizeThresholdMm = 2.2f;
-    int m_liftOffDebounceMaxFrames = 3;
     float m_fallbackSizeMm = 1.0f;
     float m_sizeAreaScale = 0.22f;
     float m_sizeSignalScale = 0.35f;
@@ -109,45 +76,9 @@ private:
     int m_rxGhostLineDelta = 0;
     float m_rxGhostWeakRatio = 0.5f;
     bool m_rxGhostOnlyNew = true;
-    bool m_enableReportFilter = false;
-    bool m_reportDuringDownDebounce = false;
-    bool m_reportStartGateEnabled = true;
-    int m_reportStartMinSignal = 80;
-    float m_reportStartMinSizeMm = 1.0f;
-    int m_reportStartStableFrames = 1;
-    bool m_reportSuppressEdgeFirst = true;
-    int m_reportEdgeStartMinSignal = 120;
-    bool m_enableReportHistoryReplay = true;
-    bool m_enableReportMultiStepBack = true;
-    int m_reportMultiStepBackMinStreak = 7;
-    bool m_emitUnreportedLiftOff = false;
-    int m_reportSuppressDebounceFrames = 1;
-    bool m_reportHoldPrevCoordinate = true;
-    bool m_reportWeakTouchSuppressEnabled = true;
-    int m_reportWeakTouchMinSignal = 70;
-    float m_reportWeakTouchMinSizeMm = 0.9f;
-    float m_reportWeakTouchMinMove = 0.8f;
-    bool m_reportEdgeWeakSuppressEnabled = true;
-    int m_reportEdgeWeakSignalThreshold = 120;
-    float m_reportEdgeWeakSizeThresholdMm = 1.0f;
-    bool m_reportEdgeJitterHoldEnabled = true;
-    int m_reportEdgeJitterSignalThreshold = 120;
-    int m_reportEdgeJitterMaxAge = 2;
-    bool m_reportCoordinateFilterEnabled = false;
-    float m_reportCoordinateFilterDistThreshold = 1.2f;
-    float m_reportCoordinateFilterAlphaSmall = 0.45f;
-    float m_reportCoordinateFilterAlphaLarge = 0.80f;
-    float m_reportMoveThreshold = 0.4f;
     bool m_useHungarian = true;
-    int m_teLostGraceFrames = 1;
-    bool m_teRecoverEnabled = true;
-    int m_teRecoverWindowFrames = 2;
-    float m_teRecoverDistance = 2.8f;
-    bool m_teRecoverDirectionConstraint = true;
-    float m_teRecoverMinReleaseSpeed = 0.4f;
-    float m_teRecoverMinCosine = 0.15f;
-    std::vector<RecentReleasedTrack> m_recentReleased;
 
+    // ---- Stylus interop ----
     bool m_stylusSuppressGlobalEnabled = true;
     bool m_stylusSuppressLocalEnabled = true;
     float m_stylusSuppressLocalDistance = 2.5f;

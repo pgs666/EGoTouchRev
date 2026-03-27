@@ -49,8 +49,8 @@ target_link_libraries(Common PUBLIC spdlog::spdlog)
 
 # --- Device Module (Hardware Abstraction) ---
 set(DEVICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Device")
-file(GLOB_RECURSE DEVICE_SOURCES "${DEVICE_ROOT}/source/*.cpp" "${DEVICE_ROOT}/*.cpp")
-file(GLOB_RECURSE DEVICE_HEADERS "${DEVICE_ROOT}/include/*.h" "${DEVICE_ROOT}/*.h")
+file(GLOB_RECURSE DEVICE_SOURCES "${DEVICE_ROOT}/*.cpp")
+file(GLOB_RECURSE DEVICE_HEADERS "${DEVICE_ROOT}/*.h")
 
 add_library(Device STATIC
     ${DEVICE_SOURCES}
@@ -62,10 +62,10 @@ target_compile_definitions(Device PUBLIC
     $<$<NOT:$<BOOL:${HIMAX_ENABLE_NEON}>>:HIMAX_ENABLE_NEON=0>
 )
 
-target_include_directories(Device PUBLIC 
-    "${DEVICE_ROOT}/include"
+target_include_directories(Device PUBLIC
+    "${DEVICE_ROOT}"
 )
-target_link_libraries(Device PUBLIC Common)
+target_link_libraries(Device PUBLIC Common Host Engine)
 
 # --- Engine Module (Touch Algorithm) ---
 set(ENGINE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Engine")
@@ -91,6 +91,7 @@ add_library(Engine STATIC
     # Reporting
     Engine/Reporting/StylusProcessor.cpp
     Engine/Reporting/TouchTracker.cpp
+    Engine/Reporting/TouchGestureStateMachine.cpp
 )
 
 target_compile_definitions(Engine PUBLIC
@@ -189,7 +190,7 @@ add_executable(EGoTouchService
 target_include_directories(EGoTouchService PRIVATE
     "${SERVICE_ROOT}/include"
 )
-target_link_libraries(EGoTouchService PRIVATE Host Common advapi32)
+target_link_libraries(EGoTouchService PRIVATE Device Host Common advapi32 setupapi)
 
 add_executable(EGoTouchControlServiceTestTool WIN32
     "${CONTROL_ROOT}/app/ControlServiceTestTool.cpp"
@@ -205,7 +206,7 @@ add_executable(BtMcuTestTool
     ${IMGUI_BACKEND_SOURCES}
 )
 target_include_directories(BtMcuTestTool PRIVATE
-    "${DEVICE_ROOT}/include"
+    "${DEVICE_ROOT}"
     "${COMMON_ROOT}/include"
     "${IMGUI_ROOT}"
     "${IMGUI_ROOT}/backends"

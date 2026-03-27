@@ -8,6 +8,7 @@
 #include "StylusProcessor.h"
 #include "TouchTracker.h"
 #include "CoordinateFilter.h"
+#include "TouchGestureStateMachine.h"
 #include <SetupAPI.h>
 #include <algorithm>
 #include <chrono>
@@ -60,8 +61,10 @@ inline void WriteU16Le(std::array<uint8_t, 32>& bytes, size_t offset, uint16_t v
 // Present (Down/Move): TipSwitch=1, Confidence=1 → 0x03
 // Released (Up):       TipSwitch=0, Confidence=0 → 0x00
 inline uint8_t EncodeVhfContactState(const Engine::TouchContact& c) {
-    if (c.state == Engine::TouchStateUp || c.reportEvent == Engine::TouchReportUp) {
-        return 0x00; // TipSwitch=0, Confidence=0
+    // State machine is the sole authority on Up/Down/Move lifecycle.
+    // Do NOT check c.state (tracker raw) — only c.reportEvent.
+    if (c.reportEvent == Engine::TouchReportUp) {
+        return 0x02; // TipSwitch=0, Confidence=1
     }
     return 0x03;     // TipSwitch=1, Confidence=1 (Down or Move)
 }
@@ -77,9 +80,9 @@ inline uint16_t ToVhf(float gridValue, float gridMax, float logicalMax, bool inv
 }
 
 RuntimeOrchestrator::RuntimeOrchestrator() {
-    LOG_INFO("App", "RuntimeOrchestrator::RuntimeOrchestrator", "Unconnected", "Initializing Himax Device Instance (Unconnected)...");
-    // 初始化 Hardware 层对象，此时只分配资源，不拉起 SPI 通信
-    m_device = std::make_unique<Himax::Chip>(DEVICE_PATH_MASTER, DEVICE_PATH_SLAVE, DEVICE_PATH_INTERRUPT);
+    LOG_INFO("App", "RuntimeOrchestrator::RuntimeOrchestrator", "Unconnected", "Initializing DeviceRuntime...");
+    m_runtime = std::make_unique<DeviceRuntime>(DEVICE_PATH_MASTER, DEVICE_PATH_SLAVE, DEVICE_PATH_INTERRUPT);
+    m_runtime->SetAutoMode(false);  // 默认 Manual，保持现有行为
     m_penCommandApi = std::make_unique<Himax::Pen::PenCommandApi>();
     m_dvrBuffer = std::make_unique<RingBuffer<Engine::HeatmapFrame, 480>>();
 
@@ -92,7 +95,7 @@ RuntimeOrchestrator::RuntimeOrchestrator() {
     m_pipeline.AddProcessor(std::make_unique<Engine::StylusProcessor>());
     m_pipeline.AddProcessor(std::make_unique<Engine::TouchTracker>());
     m_pipeline.AddProcessor(std::make_unique<Engine::CoordinateFilter>());
-    // m_pipeline.AddProcessor(std::make_unique<Engine::CentroidExtractor>());
+    m_pipeline.AddProcessor(std::make_unique<Engine::TouchGestureStateMachine>());
 
     ResetAutoAfeFreqShiftSyncState();
     
@@ -105,19 +108,14 @@ RuntimeOrchestrator::~RuntimeOrchestrator() {
 }
 
 bool RuntimeOrchestrator::Start() {
-    if (m_running.exchange(true)) return false; // Already running
-
+    if (m_running.exchange(true)) return false;
     LOG_INFO("App", "RuntimeOrchestrator::Start", "Unknown", "Starting background threads...");
-    
-    // 启动 Himax AFE (假设它已经在构造里或外面调了，或者在这里调)
-    // 也可以留给 GUI 去手动点击 "Start AFE"
-    
     ResetAutoAfeFreqShiftSyncState();
     InitializePenBridge();
-    m_acquisitionThread = std::thread(&RuntimeOrchestrator::AcquisitionThreadFunc, this);
-    m_processingThread = std::thread(&RuntimeOrchestrator::ProcessingThreadFunc, this);
-    m_systemStateThread = std::thread(&RuntimeOrchestrator::SystemStateThreadFunc, this);
 
+    m_runtime->Start();
+
+    m_processingThread = std::thread(&RuntimeOrchestrator::ProcessingThreadFunc, this);
     return true;
 }
 
@@ -125,9 +123,8 @@ void RuntimeOrchestrator::Stop() {
     const bool wasRunning = m_running.exchange(false);
     if (wasRunning) {
         LOG_INFO("App", "RuntimeOrchestrator::Stop", "Unknown", "Stopping background threads...");
-        if (m_acquisitionThread.joinable()) m_acquisitionThread.join();
+        m_runtime->Stop();
         if (m_processingThread.joinable()) m_processingThread.join();
-        if (m_systemStateThread.joinable()) m_systemStateThread.join();
         ShutdownPenBridge();
         ResetAutoAfeFreqShiftSyncState();
     }
@@ -172,23 +169,13 @@ bool RuntimeOrchestrator::GetLatestFrame(Engine::HeatmapFrame& outFrame) {
 }
 
 ChipResult<> RuntimeOrchestrator::SwitchAfeMode(AFE_Command cmd, uint8_t param) {
-    if (!m_device) {
+    if (!m_runtime) {
         return std::unexpected(ChipError::InternalError);
     }
-
-    auto res = m_device->afe_sendCommand(command{cmd, param});
-    if (!res) {
-        LOG_ERROR("App", "RuntimeOrchestrator::SwitchAfeMode", "UI",
-                  "AFE command failed: {}({}), param={}, err={}",
-                  AfeCommandToString(cmd),
-                  static_cast<int>(cmd),
-                  static_cast<unsigned int>(param),
-                  static_cast<int>(res.error()));
-        return res;
-    }
-
+    m_runtime->SubmitCommand(command{cmd, param}, CommandSource::External,
+                             AfeCommandToString(cmd));
     LOG_INFO("App", "RuntimeOrchestrator::SwitchAfeMode", "UI",
-             "AFE command success: {}({}), param={}",
+             "Queued AFE command: {}({}), param={}",
              AfeCommandToString(cmd),
              static_cast<int>(cmd),
              static_cast<unsigned int>(param));
@@ -196,79 +183,48 @@ ChipResult<> RuntimeOrchestrator::SwitchAfeMode(AFE_Command cmd, uint8_t param) 
 }
 
 ChipResult<> RuntimeOrchestrator::SafeDeinit() {
-    if (!m_device) {
+    if (!m_runtime) {
         return std::unexpected(ChipError::InternalError);
     }
-
-    // 1. Stop acquisition so the acquisition thread exits GetFrame().
     const bool wasAcquiring = m_isAcquiring.exchange(false);
-
-    // 2. Cancel any pending GetFrame I/O via CancelIoEx, then give the
-    //    acquisition thread a short window to process the cancellation.
     LOG_INFO("App", "RuntimeOrchestrator::SafeDeinit", "UI",
-             "Cancelling pending frame I/O (wasAcquiring={})...", wasAcquiring);
-    m_device->CancelPendingFrameRead();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    // 3. Now it is safe to tear down the hardware channels.
-    auto res = m_device->Deinit();
-
-    // 4. Reset auto-sync state since the device is no longer connected.
+             "Stopping runtime for deinit (wasAcquiring={})...", wasAcquiring);
+    m_runtime->Stop();
     ResetAutoAfeFreqShiftSyncState();
-
-    return res;
+    return {};
 }
 
-void RuntimeOrchestrator::AcquisitionThreadFunc() {
-    LOG_INFO("App", "RuntimeOrchestrator::AcquisitionThreadFunc", "Unknown", "Acquisition Thread started.");
-    
-    // FPS 计数: 记录最近 32 帧的时间戳，取首尾差估算帧率
+void RuntimeOrchestrator::SetAutoMode(bool enabled) {
+    if (m_runtime) m_runtime->SetAutoMode(enabled);
+}
+
+bool RuntimeOrchestrator::IsAutoMode() const {
+    return m_runtime ? m_runtime->IsAutoMode() : false;
+}
+
+void RuntimeOrchestrator::OnFrameFromRuntime(const uint8_t* data, std::size_t len) {
+    // FPS 统计
     static constexpr int FPS_WINDOW = 32;
-    std::array<std::chrono::steady_clock::time_point, FPS_WINDOW> fpsRing{};
-    int fpsHead = 0;
-    int fpsCount = 0;
-
-    while (m_running) {
-        if (m_device->GetConnectionState() != Himax::ConnectionState::Connected || !m_isAcquiring.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            fpsCount = 0; // 休眠后重置，避免假低帧率
-            continue;
+    static std::array<std::chrono::steady_clock::time_point, FPS_WINDOW> fpsRing{};
+    static int fpsHead = 0;
+    static int fpsCount = 0;
+    const auto now = std::chrono::steady_clock::now();
+    fpsRing[fpsHead] = now;
+    fpsHead = (fpsHead + 1) % FPS_WINDOW;
+    if (fpsCount < FPS_WINDOW) ++fpsCount;
+    if (fpsCount >= 2) {
+        const int oldestIdx = (fpsHead + FPS_WINDOW - fpsCount) % FPS_WINDOW;
+        const auto spanUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            now - fpsRing[oldestIdx]).count();
+        if (spanUs > 0) {
+            m_acquisitionFps.store(static_cast<int>(
+                std::llround((fpsCount - 1) * 1'000'000.0 / spanUs)));
         }
-
-        if (auto res = m_device->GetFrame(); !res) {
-            // Handle error, maybe logging is enough for now as Device does it
-            continue;
-        }
-
-        // --- FPS 统计 ---
-        const auto now = std::chrono::steady_clock::now();
-        fpsRing[fpsHead] = now;
-        fpsHead = (fpsHead + 1) % FPS_WINDOW;
-        if (fpsCount < FPS_WINDOW) ++fpsCount;
-        if (fpsCount >= 2) {
-            const int oldestIdx = (fpsHead + FPS_WINDOW - fpsCount) % FPS_WINDOW;
-            const auto& oldestTs = fpsRing[oldestIdx];
-            const auto spanUs = std::chrono::duration_cast<std::chrono::microseconds>(now - oldestTs).count();
-            if (spanUs > 0) {
-                const int fps = static_cast<int>(std::llround((fpsCount - 1) * 1'000'000.0 / spanUs));
-                m_acquisitionFps.store(fps);
-            }
-        }
-
-        // 提取采集的数据到帧对象
-        Engine::HeatmapFrame frame;
-        
-        // m_device->back_data is std::array<uint8_t, ...> inside the HAL. 
-        // We copy it out for processing. We take the 5063 master bytes (+339 slave)
-        frame.rawData.assign(m_device->back_data.begin(), m_device->back_data.end());
-
-        // Push Raw data into Processing Thread
-        m_frameBuffer.Push(frame);
-        // NOTE: No sleep here — SpiGetFrame is interrupt-driven blocking I/O.
-        // The chip fires an interrupt at every frame (120Hz = 8.33ms). Adding any
-        // sleep here would artificially cap FPS below the chip's scan rate.
     }
-    LOG_INFO("App", "RuntimeOrchestrator::AcquisitionThreadFunc", "Unknown", "Acquisition Thread stopped.");
+    // 帧数据送入处理管线
+    Engine::HeatmapFrame frame;
+    frame.rawData.assign(data, data + len);
+    m_frameBuffer.Push(frame);
 }
 
 void RuntimeOrchestrator::ProcessingThreadFunc() {
@@ -743,14 +699,7 @@ bool RuntimeOrchestrator::WriteVhfPacketLocked(const uint8_t* data, size_t lengt
     return true;
 }
 
-void RuntimeOrchestrator::SystemStateThreadFunc() {
-    LOG_INFO("App", "RuntimeOrchestrator::SystemStateThreadFunc", "Unknown", "SystemState Thread started.");
-    // TODO: (Stage 3) 使用 Host/SystemMonitor 监听亮屏/息屏，并调用 m_device->thp_afe_enter_idle()
-    while (m_running) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-    }
-    LOG_INFO("App", "RuntimeOrchestrator::SystemStateThreadFunc", "Unknown", "SystemState Thread stopped.");
-}
+
 
 void RuntimeOrchestrator::ResetAutoAfeFreqShiftSyncState() {
     m_autoAfeFreqShiftEnabledSent = false;
@@ -765,7 +714,7 @@ void RuntimeOrchestrator::HandleAutoAfeFreqShiftSync(const Engine::StylusFrameDa
     if (!m_autoAfeFreqShiftSyncEnabled.load()) {
         return;
     }
-    if (!m_device || m_device->GetConnectionState() != Himax::ConnectionState::Connected) {
+    if (!m_runtime) {
         return;
     }
     if (!stylus.slaveValid) {
@@ -774,16 +723,11 @@ void RuntimeOrchestrator::HandleAutoAfeFreqShiftSync(const Engine::StylusFrameDa
 
     // Keep firmware freq-shift feature on while auto-sync is enabled.
     if (!m_autoAfeFreqShiftEnabledSent) {
-        auto enableRes = m_device->afe_sendCommand(command{AFE_Command::EnableFreqShift, 0});
-        if (enableRes) {
-            m_autoAfeFreqShiftEnabledSent = true;
-            LOG_INFO("App", "RuntimeOrchestrator::HandleAutoAfeFreqShiftSync", "Engine",
-                     "AutoSync: EnableFreqShift sent.");
-        } else {
-            LOG_WARN("App", "RuntimeOrchestrator::HandleAutoAfeFreqShiftSync", "Engine",
-                     "AutoSync: EnableFreqShift failed, err={}", static_cast<int>(enableRes.error()));
-            return;
-        }
+        m_runtime->SubmitCommand(command{AFE_Command::EnableFreqShift, 0},
+                                 CommandSource::External, "AutoAfeSync:Enable");
+        m_autoAfeFreqShiftEnabledSent = true;
+        LOG_INFO("App", "RuntimeOrchestrator::HandleAutoAfeFreqShiftSync", "Engine",
+                 "AutoSync: EnableFreqShift queued.");
     }
 
     // Learn the pair that corresponds to freq index 0 on this single device.
@@ -819,19 +763,14 @@ void RuntimeOrchestrator::HandleAutoAfeFreqShiftSync(const Engine::StylusFrameDa
         }
     }
 
-    auto forceRes = m_device->afe_sendCommand(command{AFE_Command::ForceToFreqPoint,
-                                              static_cast<uint8_t>(targetIdx)});
-    if (!forceRes) {
-        LOG_WARN("App", "RuntimeOrchestrator::HandleAutoAfeFreqShiftSync", "Engine",
-                 "AutoSync: ForceToFreqPoint(idx={}) failed, err={}",
-                 targetIdx, static_cast<int>(forceRes.error()));
-        return;
-    }
+    m_runtime->SubmitCommand(command{AFE_Command::ForceToFreqPoint,
+                                      static_cast<uint8_t>(targetIdx)},
+                             CommandSource::External, "AutoAfeSync:Force");
 
     m_autoAfeLastForcedFreqIdx = targetIdx;
     m_autoAfeLastForceTs = now;
     LOG_INFO("App", "RuntimeOrchestrator::HandleAutoAfeFreqShiftSync", "Engine",
-             "AutoSync: ForceToFreqPoint idx={} for next pair [0x{:04X}, 0x{:04X}]",
+             "AutoSync: ForceToFreqPoint idx={} queued for next pair [0x{:04X}, 0x{:04X}]",
              targetIdx,
              static_cast<unsigned int>(stylus.nextTx1Freq),
              static_cast<unsigned int>(stylus.nextTx2Freq));

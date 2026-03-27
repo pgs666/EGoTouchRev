@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SystemStateMonitor.h"
+#include "runtime/DeviceRuntime.h"
 #include <memory>
 
 namespace Service {
@@ -22,12 +23,12 @@ public:
     void Stop();
 
 private:
-    // 系统监控模块（当前唯一加载的模块）
+    std::unique_ptr<DeviceRuntime> m_deviceRuntime;
     std::unique_ptr<Host::SystemStateMonitor> m_sysMonitor;
 
+    void BuildDefaultPipeline();
+
     // TODO: 后续添加
-    // std::unique_ptr<DeviceRuntime>            m_deviceRuntime;
-    // std::unique_ptr<TouchEngine>              m_touchEngine;
     // std::unique_ptr<Control::ControlPipeServer> m_pipeServer;
 };
 

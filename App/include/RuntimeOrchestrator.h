@@ -1,6 +1,6 @@
 #pragma once
 
-#include "himax/HimaxChip.h"
+#include "runtime/DeviceRuntime.h"
 #include "btmcu/PenCommandApi.h"
 #include "ConcurrentRingBuffer.h"
 #ifndef NOMINMAX
@@ -30,10 +30,14 @@ public:
     bool Start();
     void Stop();
     
-    // GUI 交互接口，用于手动控制芯片
-    Himax::Chip* GetDevice() { return m_device.get(); }
-    ChipResult<> SafeDeinit();   // Thread-safe deinit: stops acquisition first
+    // GUI 交互接口
+    DeviceRuntime* GetRuntime() { return m_runtime.get(); }
+    ChipResult<> SafeDeinit();
     ChipResult<> SwitchAfeMode(AFE_Command cmd, uint8_t param = 0);
+    
+    // Auto/Manual 模式
+    void SetAutoMode(bool enabled);
+    bool IsAutoMode() const;
     
     // 注入供 GUI 使用的最新热力图引用
     bool GetLatestFrame(Engine::HeatmapFrame& outFrame);
@@ -81,9 +85,8 @@ public:
     void TriggerDVRExport(bool exportHeatmap, bool exportMasterStatus, bool exportSlaveStatus);
 
 private:
-    void AcquisitionThreadFunc();
+    void OnFrameFromRuntime(const uint8_t* data, std::size_t len);
     void ProcessingThreadFunc();
-    void SystemStateThreadFunc();
     void InitializePenBridge();
     void ShutdownPenBridge();
     std::optional<std::wstring> FindPenMcuDevicePath() const;
@@ -110,12 +113,10 @@ private:
     std::atomic<int>     m_acquisitionFps{0};
     
     // Modules
-    std::unique_ptr<Himax::Chip> m_device;
+    std::unique_ptr<DeviceRuntime> m_runtime;
     
     // Threads
-    std::thread m_acquisitionThread;
     std::thread m_processingThread;
-    std::thread m_systemStateThread;
 
     // Engine Pipeline
     Engine::FramePipeline m_pipeline;

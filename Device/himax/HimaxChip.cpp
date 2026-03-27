@@ -884,37 +884,105 @@ Chip::~Chip() {
     }
 }
 
-bool isFingerDetected(void) {
-    return false; // TODO: implement finger detection from back_data
+/**
+ * @brief 检测是否有手指触摸
+ * 
+ * 从 master status 表（back_data[4807..]）的 word[54] 和 word[55] 判断。
+ * 固件在有触点时写入 TX/RX 坐标；无触点时 xy 均为 0xFF。
+ */
+bool Chip::isFingerDetected() const {
+    constexpr size_t kStatusOffset = 7 + 4800;  // 4807: master status 表起始
+    constexpr size_t kTouchXWord   = 54;        // 触点 X 坐标 (u16 word index)
+    constexpr size_t kTouchYWord   = 55;        // 触点 Y 坐标 (u16 word index)
+
+    const uint8_t* st = back_data.data() + kStatusOffset;
+
+    auto readU16 = [&](size_t wordIdx) -> uint16_t {
+        size_t byteIdx = wordIdx * 2;
+        return static_cast<uint16_t>(st[byteIdx] | (st[byteIdx + 1] << 8));
+    };
+
+    uint16_t touch_x = readU16(kTouchXWord);
+    uint16_t touch_y = readU16(kTouchYWord);
+
+    // 固件无触点时 xy 均为 0xFF（即 u16 低字节 0xFF）
+    return !((touch_x & 0xFF) == 0xFF && (touch_y & 0xFF) == 0xFF);
+}
+
+/**
+ * @brief 检测是否有手写笔输入
+ * 
+ * Slave 帧起始于 back_data[5063]。字节 [0] 是校验位，
+ * 字节 [1] 和 [2] 是手写笔状态（与 master 的 xy==0xFF 判定一致）。
+ */
+bool Chip::isStylusDetected() const {
+    constexpr size_t kSlaveOffset = 5063;
+    const uint8_t b1 = back_data[kSlaveOffset + 1];
+    const uint8_t b2 = back_data[kSlaveOffset + 2];
+    return !(b1 == 0xFF && b2 == 0xFF);
 }
 
 ChipResult<> Chip::GetFrame(void) {
-    // 从 Master 读取主帧数据 (5063 bytes)
-    if (auto res = m_master->GetFrame(back_data.data(), 5063, nullptr); !res) {
-        if (m_master->IsTimeoutError()) {
+
+    // ── Idle 模式：500ms 睡眠后做一次帧获取检测唤醒 ──────────
+    if (afe_mode.load() == THP_AFE_MODE::Idle) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        // 尝试读一帧用于唤醒检测（master + slave）
+        auto m_res = m_master->GetFrame(back_data.data(), 5063, nullptr);
+        auto s_res = m_slave->GetFrame(back_data.data() + 5063, 339, nullptr);
+
+        if (m_res && s_res) {
+            if (isFingerDetected() || isStylusDetected()) {
+                (void)NotifyTouchWakeup();
+                LOG_INFO("Device", "Chip::GetFrame", GetStateStr(),
+                         "Input detected in idle → wakeup to Normal");
+            }
+            // 无输入: 丢弃 idle 帧，返回超时让 caller 继续循环
             return std::unexpected(ChipError::Timeout);
         }
-        LOG_ERROR("Device", "Chip::GetFrame", GetStateStr(), "Master GetFrame failed!");
-        return res;
+        // 读帧失败（超时）= 芯片仍在深度 idle
+        return std::unexpected(ChipError::Timeout);
     }
 
-    // 从 Slave 读取副帧数据 (339 bytes)，拼接到 Master 之后
+    // ── Normal 模式：2:1 交错帧获取 ──────────────────────────
+
+    // 1. 总是读 Slave (stylus, 有效 240Hz)
     if (auto res = m_slave->GetFrame(back_data.data() + 5063, 339, nullptr); !res) {
-        if (m_slave->IsTimeoutError()) {
+        if (m_slave->IsTimeoutError())
             return std::unexpected(ChipError::Timeout);
-        }
         LOG_ERROR("Device", "Chip::GetFrame", GetStateStr(), "Slave GetFrame failed!");
         return res;
     }
 
-    if (afe_mode.load() == THP_AFE_MODE::Idle) {
-        if (isFingerDetected()) {
-            (void)m_master->SetTimeOut(uint32_t(THP_AFE_MODE::Normal));
-            (void)m_slave->SetTimeOut(uint32_t(THP_AFE_MODE::Normal));
-            afe_mode.store(THP_AFE_MODE::Normal);
+    // 2. 条件读 Master (touch, 有效 120Hz)
+    //    奇数帧 且 手写笔已连接 → 跳过 Master，复用上一帧数据
+    bool skipMaster = (m_frameCount & 1) != 0 && m_stylus.connected;
+    if (!skipMaster) {
+        if (auto res = m_master->GetFrame(back_data.data(), 5063, nullptr); !res) {
+            if (m_master->IsTimeoutError())
+                return std::unexpected(ChipError::Timeout);
+            LOG_ERROR("Device", "Chip::GetFrame", GetStateStr(), "Master GetFrame failed!");
+            return res;
         }
     }
+    m_frameCount++;
 
+    // ── 零帧计数 & idle 自动进入 ──────────────────────────────
+    constexpr uint32_t kIdleEntryThreshold = 600;  // ~5 秒 @120Hz
+
+    if (isFingerDetected() || isStylusDetected()) {
+        m_zeroFrameCount = 0;
+    } else {
+        m_zeroFrameCount++;
+        if (m_zeroFrameCount >= kIdleEntryThreshold) {
+            LOG_INFO("Device", "Chip::GetFrame", GetStateStr(),
+                     "No input for {} frames → EnterIdle",
+                     m_zeroFrameCount);
+            (void)thp_afe_enter_idle();
+            m_zeroFrameCount = 0;
+        }
+    }
 
     return {};
 }

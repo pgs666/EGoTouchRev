@@ -15,6 +15,7 @@
 #include <memory>
 #include <array>
 #include <string>
+#include <thread>
 #include <winnt.h>
 
 // Note: The legacy HIMAX_LOG is removed. We use LOG_INFO, LOG_ERROR, etc. from Logger.h
@@ -42,6 +43,8 @@ namespace Himax {
             std::unique_ptr<HalDevice> m_interrupt;
             
             uint8_t current_slot;
+            uint32_t m_zeroFrameCount = 0;   // 连续无输入帧计数（idle 进入判断）
+            uint32_t m_frameCount = 0;       // 帧计数器（2:1 交错用）
             
             ic_operation        pic_op{};
             fw_operation        pfw_op{};
@@ -81,8 +84,12 @@ namespace Himax {
         public:
             alignas(64) std::array<uint8_t, 6000> back_data{};
             THP_INSPECTION_ENUM m_inspection_mode;
-            std::atomic<THP_AFE_MODE> afe_mode;
+            std::atomic<THP_AFE_MODE> afe_mode{THP_AFE_MODE::Normal};
             StylusState m_stylus;    // 手写笔运行时状态（连接/频点/切换策略）
+
+            // 触点/手写笔检测：从帧数据判断是否有输入
+            bool isFingerDetected() const;
+            bool isStylusDetected() const;
 
             
             // 主机的连接状态机

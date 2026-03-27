@@ -88,42 +88,81 @@ void DiagnosticsWorkbench::DrawControlPanel() {
     ImGui::Begin("Device Control Panel");
     
     if (ImGui::Button("EXIT APPLICATION", ImVec2(-1, 30))) {
-        exit(0);
+        if (m_runtimeOrchestrator) {
+            m_runtimeOrchestrator->Stop();  // Worker → Deinit → SPI clean release
+        }
+        ::PostQuitMessage(0);
     }
     ImGui::Separator();
     
     if (m_runtimeOrchestrator) {
-        Himax::Chip* chip = m_runtimeOrchestrator->GetDevice();
-        if (chip) {
-            auto connState = chip->GetConnectionState();
-            bool connected = (connState == Himax::ConnectionState::Connected);
+        // Auto/Manual 模式切换
+        bool autoMode = m_runtimeOrchestrator->IsAutoMode();
+        if (ImGui::Checkbox("Auto Mode (Worker Controls Chip)", &autoMode)) {
+            m_runtimeOrchestrator->SetAutoMode(autoMode);
+        }
+        if (autoMode) {
+            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.4f, 1.f),
+                "Worker: auto init/stream/recover");
+        } else {
+            ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.2f, 1.f),
+                "Manual: use buttons below");
+        }
+        ImGui::Separator();
+
+        DeviceRuntime* rt = m_runtimeOrchestrator->GetRuntime();
+        if (rt) {
+            auto snap = rt->GetSnapshot();
+            bool connected = (snap.state == workerState::streaming);
 
             ImGui::Text("Connection Status: %s", connected ? "Connected" : "Unconnected");
-            
-            if (ImGui::Button("Chip::Init")) {
-                if (!connected) {
-                    LOG_INFO("App", "DiagnosticsWorkbench::DrawControlPanel", "UI", "Chip Init User Action");
-                    [[maybe_unused]] auto _r = chip->Init();
+
+            if (autoMode) {
+                // Auto 模式: Start/Stop Worker（Worker 内部自动 Init/Deinit）
+                bool workerRunning = rt->IsRunning();
+                auto stateStr = ToString(snap.state);
+                ImGui::Text("Worker State: %s", stateStr);
+                if (workerRunning) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.f));
+                    if (ImGui::Button("Stop Worker (Deinit)", ImVec2(-1, 0))) {
+                        rt->Stop();
+                    }
+                    ImGui::PopStyleColor();
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.7f, 0.25f, 1.f));
+                    if (ImGui::Button("Start Worker (Auto Init)", ImVec2(-1, 0))) {
+                        rt->Start();
+                    }
+                    ImGui::PopStyleColor();
                 }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Chip::Deinit")) { // Renamed Disconnect to Deinit for consistency
-                if (connected) {
-                    LOG_INFO("App", "DiagnosticsWorkbench::DrawControlPanel", "UI", "Chip SafeDeinit User Action");
-                    [[maybe_unused]] auto _r = m_runtimeOrchestrator->SafeDeinit();
+            } else {
+                // Manual 模式: 通过命令队列操作
+                if (ImGui::Button("Chip::Init")) {
+                    if (!connected) {
+                        LOG_INFO("App", "DiagnosticsWorkbench::DrawControlPanel", "UI", "Chip Init User Action");
+                        rt->SetAutoMode(true);
+                        rt->Start();
+                    }
                 }
+                ImGui::SameLine();
+                if (ImGui::Button("Chip::Deinit")) {
+                    if (connected) {
+                        LOG_INFO("App", "DiagnosticsWorkbench::DrawControlPanel", "UI", "Chip SafeDeinit User Action");
+                        [[maybe_unused]] auto _r = m_runtimeOrchestrator->SafeDeinit();
+                    }
+                }
+                
+                ImGui::Separator();
+                
+                bool loopActive = m_runtimeOrchestrator->IsAcquisitionActive();
+                if (!connected) ImGui::BeginDisabled();
+                if (ImGui::Button(loopActive ? "Stop Reading Loop" : "Start Reading Loop")) {
+                    m_runtimeOrchestrator->SetAcquisitionActive(!loopActive);
+                    LOG_INFO("App", "DiagnosticsWorkbench::DrawControlPanel", "UI", "{} Reading Loop User Action", 
+                        loopActive ? "Stop" : "Start");
+                }
+                if (!connected) ImGui::EndDisabled();
             }
-            
-            ImGui::Separator();
-            
-            bool loopActive = m_runtimeOrchestrator->IsAcquisitionActive();
-            if (!connected) ImGui::BeginDisabled();
-            if (ImGui::Button(loopActive ? "Stop Reading Loop" : "Start Reading Loop")) {
-                m_runtimeOrchestrator->SetAcquisitionActive(!loopActive);
-                LOG_INFO("App", "DiagnosticsWorkbench::DrawControlPanel", "UI", "{} Reading Loop User Action", 
-                    loopActive ? "Stop" : "Start");
-            }
-            if (!connected) ImGui::EndDisabled();
 
             ImGui::Separator();
             

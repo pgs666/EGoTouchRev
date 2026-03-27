@@ -38,6 +38,7 @@ struct SlaveLayoutCandidate {
 
 bool StylusProcessor::Process(HeatmapFrame& frame) {
     if (!m_enabled) {
+        ResetStylusFrame(frame);  // Clear stale packet.valid to prevent ghost reports
         return true;
     }
 

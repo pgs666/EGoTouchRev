@@ -2,6 +2,9 @@
 
 #include "SystemStateMonitor.h"
 #include "runtime/DeviceRuntime.h"
+#include "IpcPipeServer.h"
+#include "SharedFrameBuffer.h"
+#include "ConfigSync.h"
 #include <memory>
 
 namespace Service {
@@ -26,10 +29,14 @@ private:
     std::unique_ptr<DeviceRuntime> m_deviceRuntime;
     std::unique_ptr<Host::SystemStateMonitor> m_sysMonitor;
 
-    void BuildDefaultPipeline();
+    // IPC
+    Ipc::IpcPipeServer      m_ipcServer;
+    Ipc::SharedFrameWriter  m_frameWriter;
+    Ipc::ConfigDirtyFlag    m_configDirty;
+    bool                    m_debugMode = false;
 
-    // TODO: 后续添加
-    // std::unique_ptr<Control::ControlPipeServer> m_pipeServer;
+    void BuildDefaultPipeline();
+    Ipc::IpcResponse HandleIpcCommand(const Ipc::IpcRequest& req);
 };
 
 } // namespace Service

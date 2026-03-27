@@ -1,5 +1,6 @@
 #include "ServiceHost.h"
 #include "Logger.h"
+#include "IpcProtocol.h"
 
 // Engine Pipeline Processors
 #include "MasterFrameParser.h"
@@ -58,8 +59,15 @@ bool ServiceHost::Start() {
                  "SystemStateMonitor started.");
     }
 
-    // ── 3. TODO: ControlPipeServer ──────────────────────────
-    // m_pipeServer = ...
+    // ── 3. IPC Pipe Server ──────────────────────────────────
+    m_configDirty.Open();
+    m_ipcServer.SetCommandHandler(
+        [this](const Ipc::IpcRequest& req) {
+            return HandleIpcCommand(req);
+        });
+    m_ipcServer.Start();
+    LOG_INFO("ServiceHost", "Start", "Boot",
+             "IPC pipe server started.");
 
     LOG_INFO("ServiceHost", "Start", "Boot",
              "All modules started.");
@@ -69,8 +77,10 @@ bool ServiceHost::Start() {
 void ServiceHost::Stop() {
     // 逆序停止（后启动的先停止）
 
-    // TODO: ControlPipeServer
-    // if (m_pipeServer) m_pipeServer->Stop();
+    m_ipcServer.Stop();
+    m_frameWriter.Close();
+    m_configDirty.Close();
+    m_debugMode = false;
 
     if (m_sysMonitor) {
         m_sysMonitor->Stop();
@@ -105,6 +115,94 @@ void ServiceHost::BuildDefaultPipeline() {
     LOG_INFO("ServiceHost", "BuildDefaultPipeline", "Boot",
              "Registered {} pipeline processors.",
              pl.GetProcessors().size());
+}
+
+// ── IPC Command Handler ──────────────────────────────
+Ipc::IpcResponse ServiceHost::HandleIpcCommand(
+        const Ipc::IpcRequest& req) {
+    Ipc::IpcResponse resp{};
+    switch (req.command) {
+    case Ipc::IpcCommand::Ping:
+        resp.success = true;
+        break;
+
+    case Ipc::IpcCommand::EnterDebugMode: {
+        // param contains wchar_t shared memory name
+        const wchar_t* shmName =
+            reinterpret_cast<const wchar_t*>(req.param);
+        if (m_frameWriter.Open(shmName)) {
+            m_deviceRuntime->SetFramePushCallback(
+                [this](const Engine::HeatmapFrame& f) {
+                    m_frameWriter.Write(f);
+                });
+            m_debugMode = true;
+            resp.success = true;
+            LOG_INFO("ServiceHost", "HandleIpcCommand", "IPC",
+                     "Entered debug mode.");
+        }
+        break;
+    }
+
+    case Ipc::IpcCommand::ExitDebugMode:
+        m_deviceRuntime->SetFramePushCallback(nullptr);
+        m_frameWriter.Close();
+        m_debugMode = false;
+        resp.success = true;
+        LOG_INFO("ServiceHost", "HandleIpcCommand", "IPC",
+                 "Exited debug mode.");
+        break;
+
+    case Ipc::IpcCommand::AfeCommand:
+        if (req.paramLen >= 2 && m_deviceRuntime) {
+            command cmd{};
+            cmd.type = static_cast<AFE_Command>(req.param[0]);
+            cmd.param = req.param[1];
+            m_deviceRuntime->SubmitCommand(
+                cmd, CommandSource::External, "IPC AFE");
+            resp.success = true;
+        }
+        break;
+
+    case Ipc::IpcCommand::StartRuntime:
+        if (m_deviceRuntime) {
+            resp.success = m_deviceRuntime->Start();
+        }
+        break;
+
+    case Ipc::IpcCommand::StopRuntime:
+        if (m_deviceRuntime) {
+            m_deviceRuntime->Stop();
+            resp.success = true;
+        }
+        break;
+
+    case Ipc::IpcCommand::ReloadConfig:
+    case Ipc::IpcCommand::SaveConfig:
+        resp.success = true;  // placeholder
+        break;
+
+    case Ipc::IpcCommand::SetVhfEnabled:
+        if (m_deviceRuntime && req.paramLen >= 1) {
+            m_deviceRuntime->GetVhfReporter().SetEnabled(req.param[0] != 0);
+            resp.success = true;
+        }
+        break;
+
+    case Ipc::IpcCommand::SetVhfTranspose:
+        if (m_deviceRuntime && req.paramLen >= 1) {
+            m_deviceRuntime->GetVhfReporter().SetTransposeEnabled(req.param[0] != 0);
+            resp.success = true;
+        }
+        break;
+
+    case Ipc::IpcCommand::SetAutoAfeSync:
+        resp.success = true; // placeholder — future DeviceRuntime integration
+        break;
+
+    default:
+        break;
+    }
+    return resp;
 }
 
 } // namespace Service

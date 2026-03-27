@@ -1,5 +1,5 @@
 #include "DiagnosticsWorkbench.h"
-#include "himax/HimaxChip.h"
+#include "Device.h"
 #include "MasterFrameParser.h"
 #include "BaselineSubtraction.h"
 #include "CMFProcessor.h"
@@ -41,7 +41,7 @@ void DrawProcessorConfigBlock(Engine::IFrameProcessor* processor, int idBase) {
 
 } // namespace
 
-DiagnosticsWorkbench::DiagnosticsWorkbench(RuntimeOrchestrator* runtime_orchestrator) : m_runtimeOrchestrator(runtime_orchestrator) {
+DiagnosticsWorkbench::DiagnosticsWorkbench(ServiceProxy* proxy) : m_proxy(proxy) {
 }
 
 DiagnosticsWorkbench::~DiagnosticsWorkbench() {
@@ -50,8 +50,8 @@ DiagnosticsWorkbench::~DiagnosticsWorkbench() {
 // ... rest of the content up to DrawHeatmap
 void DiagnosticsWorkbench::Render() {
     // 拉取最新的数据
-    if (m_autoRefresh && m_renderVisualization && m_runtimeOrchestrator) {
-        m_runtimeOrchestrator->GetLatestFrame(m_currentFrame);
+    if (m_autoRefresh && m_renderVisualization && m_proxy) {
+        m_proxy->GetLatestFrame(m_currentFrame);
     }
 
     // Keyboard Hotkeys
@@ -88,107 +88,55 @@ void DiagnosticsWorkbench::DrawControlPanel() {
     ImGui::Begin("Device Control Panel");
     
     if (ImGui::Button("EXIT APPLICATION", ImVec2(-1, 30))) {
-        if (m_runtimeOrchestrator) {
-            m_runtimeOrchestrator->Stop();  // Worker → Deinit → SPI clean release
+        if (m_proxy) {
+            m_proxy->Disconnect();
         }
         ::PostQuitMessage(0);
     }
     ImGui::Separator();
     
-    if (m_runtimeOrchestrator) {
-        // Auto/Manual 模式切换
-        bool autoMode = m_runtimeOrchestrator->IsAutoMode();
-        if (ImGui::Checkbox("Auto Mode (Worker Controls Chip)", &autoMode)) {
-            m_runtimeOrchestrator->SetAutoMode(autoMode);
-        }
-        if (autoMode) {
-            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.4f, 1.f),
-                "Worker: auto init/stream/recover");
-        } else {
-            ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.2f, 1.f),
-                "Manual: use buttons below");
-        }
-        ImGui::Separator();
+    if (m_proxy) {
+        // Service 连接状态
+        bool connected = m_proxy->IsConnected();
+        ImGui::Text("Service Status: %s", connected ? "Connected" : "Disconnected");
 
-        DeviceRuntime* rt = m_runtimeOrchestrator->GetRuntime();
-        if (rt) {
-            auto snap = rt->GetSnapshot();
-            bool connected = (snap.state == workerState::streaming);
-
-            ImGui::Text("Connection Status: %s", connected ? "Connected" : "Unconnected");
-
-            if (autoMode) {
-                // Auto 模式: Start/Stop Worker（Worker 内部自动 Init/Deinit）
-                bool workerRunning = rt->IsRunning();
-                auto stateStr = ToString(snap.state);
-                ImGui::Text("Worker State: %s", stateStr);
-                if (workerRunning) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.f));
-                    if (ImGui::Button("Stop Worker (Deinit)", ImVec2(-1, 0))) {
-                        rt->Stop();
-                    }
-                    ImGui::PopStyleColor();
-                } else {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.7f, 0.25f, 1.f));
-                    if (ImGui::Button("Start Worker (Auto Init)", ImVec2(-1, 0))) {
-                        rt->Start();
-                    }
-                    ImGui::PopStyleColor();
-                }
-            } else {
-                // Manual 模式: 通过命令队列操作
-                if (ImGui::Button("Chip::Init")) {
-                    if (!connected) {
-                        LOG_INFO("App", "DiagnosticsWorkbench::DrawControlPanel", "UI", "Chip Init User Action");
-                        rt->SetAutoMode(true);
-                        rt->Start();
-                    }
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Chip::Deinit")) {
-                    if (connected) {
-                        LOG_INFO("App", "DiagnosticsWorkbench::DrawControlPanel", "UI", "Chip SafeDeinit User Action");
-                        [[maybe_unused]] auto _r = m_runtimeOrchestrator->SafeDeinit();
-                    }
-                }
-                
-                ImGui::Separator();
-                
-                bool loopActive = m_runtimeOrchestrator->IsAcquisitionActive();
-                if (!connected) ImGui::BeginDisabled();
-                if (ImGui::Button(loopActive ? "Stop Reading Loop" : "Start Reading Loop")) {
-                    m_runtimeOrchestrator->SetAcquisitionActive(!loopActive);
-                    LOG_INFO("App", "DiagnosticsWorkbench::DrawControlPanel", "UI", "{} Reading Loop User Action", 
-                        loopActive ? "Stop" : "Start");
-                }
-                if (!connected) ImGui::EndDisabled();
+        if (connected) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.f));
+            if (ImGui::Button("Stop Runtime", ImVec2(-1, 0))) {
+                m_proxy->StopRemoteRuntime();
             }
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.7f, 0.25f, 1.f));
+            if (ImGui::Button("Start Runtime", ImVec2(-1, 0))) {
+                m_proxy->StartRemoteRuntime();
+            }
+            ImGui::PopStyleColor();
+        }
 
-            ImGui::Separator();
-            
-            if (!connected) ImGui::BeginDisabled();
+        ImGui::Separator();
+        
+        if (!connected) ImGui::BeginDisabled();
 
-            auto clamp_u8 = [](int value) -> uint8_t {
-                return static_cast<uint8_t>(std::clamp(value, 0, 255));
-            };
-            auto send_afe_command = [&](const char* actionName, AFE_Command cmd, int paramValue) {
-                const uint8_t param = clamp_u8(paramValue);
-                auto res = m_runtimeOrchestrator->SwitchAfeMode(cmd, param);
-                if (res) {
-                    m_lastAfeActionStatus = std::string(actionName) + " success (param=" +
-                                            std::to_string(static_cast<unsigned int>(param)) + ")";
-                    return;
-                }
-
+        auto clamp_u8 = [](int value) -> uint8_t {
+            return static_cast<uint8_t>(std::clamp(value, 0, 255));
+        };
+        auto send_afe_command = [&](const char* actionName, AFE_Command cmd, int paramValue) {
+            const uint8_t param = clamp_u8(paramValue);
+            bool ok = m_proxy->SwitchAfeMode(static_cast<uint8_t>(cmd), param);
+            if (ok) {
+                m_lastAfeActionStatus = std::string(actionName) + " success (param=" +
+                                        std::to_string(static_cast<unsigned int>(param)) + ")";
+            } else {
                 m_lastAfeActionStatus = std::string(actionName) + " failed (param=" +
-                                        std::to_string(static_cast<unsigned int>(param)) +
-                                        ", err=" + std::to_string(static_cast<int>(res.error())) + ")";
-            };
+                                        std::to_string(static_cast<unsigned int>(param)) + ")";
+            }
+        };
 
             ImGui::TextUnformatted("AFE Mode Control");
-            bool autoFreqShiftSync = m_runtimeOrchestrator->IsAutoAfeFreqShiftSyncEnabled();
+            bool autoFreqShiftSync = m_proxy->IsAutoAfeSyncEnabled();
             if (ImGui::Checkbox("Auto FreqShift Sync (Engine->AFE)", &autoFreqShiftSync)) {
-                m_runtimeOrchestrator->SetAutoAfeFreqShiftSyncEnabled(autoFreqShiftSync);
+                m_proxy->SetAutoAfeSync(autoFreqShiftSync);
             }
             m_afeIdleParam = std::clamp(m_afeIdleParam, 0, 255);
             ImGui::InputInt("Idle Param", &m_afeIdleParam);
@@ -256,45 +204,46 @@ void DiagnosticsWorkbench::DrawControlPanel() {
             ImGui::TextWrapped("AFE Last Action: %s", m_lastAfeActionStatus.c_str());
             
             if (!connected) ImGui::EndDisabled();
-        }
     }
     
-    bool isActive = m_runtimeOrchestrator->IsAcquisitionActive();
-    if (ImGui::Button(isActive ? "Stop AFE" : "Start AFE")) {
-        m_runtimeOrchestrator->SetAcquisitionActive(!isActive);
+    // Start/Stop Runtime toggle
+    if (m_proxy && m_proxy->IsConnected()) {
+        if (ImGui::Button("Toggle Runtime")) {
+            m_proxy->StartRemoteRuntime();
+        }
     }
     
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
     if (ImGui::Button("Save Global Parameters")) {
-        m_runtimeOrchestrator->SaveConfig();
+        m_proxy->SaveConfig();
     }
     ImGui::PopStyleColor();
 
-    bool masterParserOnly = (m_runtimeOrchestrator != nullptr) && m_runtimeOrchestrator->IsMasterParserOnlyMode();
-    if (!m_runtimeOrchestrator) ImGui::BeginDisabled();
-    if (ImGui::Checkbox("Master Parser Only (Raw Heatmap)", &masterParserOnly) && m_runtimeOrchestrator) {
-        m_runtimeOrchestrator->SetMasterParserOnlyMode(masterParserOnly);
+    bool masterParserOnly = (m_proxy != nullptr) && m_proxy->IsMasterParserOnlyMode();
+    if (!m_proxy) ImGui::BeginDisabled();
+    if (ImGui::Checkbox("Master Parser Only (Raw Heatmap)", &masterParserOnly) && m_proxy) {
+        m_proxy->SetMasterParserOnlyMode(masterParserOnly);
     }
-    if (!m_runtimeOrchestrator) ImGui::EndDisabled();
+    if (!m_proxy) ImGui::EndDisabled();
     if (masterParserOnly) {
         ImGui::TextUnformatted("Enabled: only Master Frame Parser is active.");
     }
 
     ImGui::Separator();
-    bool vhfReportingEnabled = (m_runtimeOrchestrator != nullptr) && m_runtimeOrchestrator->IsVhfReportingEnabled();
-    if (!m_runtimeOrchestrator) ImGui::BeginDisabled();
-    if (ImGui::Checkbox("Enable VHF Output", &vhfReportingEnabled) && m_runtimeOrchestrator) {
-        m_runtimeOrchestrator->SetVhfReportingEnabled(vhfReportingEnabled);
+    bool vhfReportingEnabled = (m_proxy != nullptr) && m_proxy->IsVhfEnabled();
+    if (!m_proxy) ImGui::BeginDisabled();
+    if (ImGui::Checkbox("Enable VHF Output", &vhfReportingEnabled) && m_proxy) {
+        m_proxy->SetVhfEnabled(vhfReportingEnabled);
     }
-    if (m_runtimeOrchestrator) {
-        ImGui::Text("VHF Device: %s", m_runtimeOrchestrator->IsVhfDeviceOpen() ? "Open" : "Closed");
-        bool vhfTranspose = m_runtimeOrchestrator->IsVhfTransposeEnabled();
+    if (m_proxy) {
+        ImGui::Text("VHF: %s", m_proxy->IsVhfEnabled() ? "Enabled" : "Disabled");
+        bool vhfTranspose = m_proxy->IsVhfTransposeEnabled();
         if (ImGui::Checkbox("Flip VHF Orientation", &vhfTranspose)) {
-            m_runtimeOrchestrator->SetVhfTransposeEnabled(vhfTranspose);
+            m_proxy->SetVhfTranspose(vhfTranspose);
         }
     }
-    if (!m_runtimeOrchestrator) ImGui::EndDisabled();
+    if (!m_proxy) ImGui::EndDisabled();
 
     ImGui::Separator();
     ImGui::TextUnformatted("Window Visibility");
@@ -320,8 +269,8 @@ void DiagnosticsWorkbench::DrawControlPanel() {
     }
     ImGui::SameLine();
     if (ImGui::Button("Export DVR (Last 480 Frames)")) {
-        if (m_runtimeOrchestrator) {
-            m_runtimeOrchestrator->TriggerDVRExport(m_exportHeatmap, m_exportMasterStatus, m_exportSlaveStatus);
+        if (m_proxy) {
+            m_proxy->TriggerDVRExport(m_exportHeatmap, m_exportMasterStatus, m_exportSlaveStatus);
         }
     }
     
@@ -329,12 +278,12 @@ void DiagnosticsWorkbench::DrawControlPanel() {
     ImGui::Text("Auto-Capture (Debug)");
     ImGui::SliderInt("Target Peaks", &m_autoExportTargetPeaks, 0, 5, m_autoExportTargetPeaks == 0 ? "Disabled" : "%d Peaks");
     
-    if (m_runtimeOrchestrator) {
+    if (m_proxy) {
         ImGui::Separator();
         ImGui::TextUnformatted("Common Preprocess Pipeline");
         if (masterParserOnly) ImGui::BeginDisabled();
         int id = 1000;
-        for (const auto& p : m_runtimeOrchestrator->GetPipeline().GetProcessors()) {
+        for (const auto& p : m_proxy->GetPipeline().GetProcessors()) {
             if (dynamic_cast<Engine::MasterFrameParser*>(p.get()) ||
                 dynamic_cast<Engine::BaselineSubtraction*>(p.get()) ||
                 dynamic_cast<Engine::CMFProcessor*>(p.get()) ||
@@ -362,13 +311,13 @@ void DiagnosticsWorkbench::DrawTouchSolverPanel() {
     ImGui::SetNextWindowSize(ImVec2(430, 520), ImGuiCond_FirstUseEver);
     ImGui::Begin("Touch Solver Panel (Feature Extraction)");
 
-    if (!m_runtimeOrchestrator) {
+    if (!m_proxy) {
         ImGui::TextUnformatted("RuntimeOrchestrator unavailable.");
         ImGui::End();
         return;
     }
 
-    const bool masterParserOnly = m_runtimeOrchestrator->IsMasterParserOnlyMode();
+    const bool masterParserOnly = m_proxy->IsMasterParserOnlyMode();
     if (masterParserOnly) {
         ImGui::TextUnformatted("Master Parser Only is enabled.");
         ImGui::BeginDisabled();
@@ -376,7 +325,7 @@ void DiagnosticsWorkbench::DrawTouchSolverPanel() {
 
     bool foundAny = false;
     int id = 2000;
-    for (const auto& p : m_runtimeOrchestrator->GetPipeline().GetProcessors()) {
+    for (const auto& p : m_proxy->GetPipeline().GetProcessors()) {
         if (dynamic_cast<Engine::FeatureExtractor*>(p.get())) {
             DrawProcessorConfigBlock(p.get(), id++);
             foundAny = true;
@@ -398,13 +347,13 @@ void DiagnosticsWorkbench::DrawTouchTrackingPanel() {
     ImGui::SetNextWindowSize(ImVec2(430, 520), ImGuiCond_FirstUseEver);
     ImGui::Begin("Touch Tracking/Report Panel");
 
-    if (!m_runtimeOrchestrator) {
+    if (!m_proxy) {
         ImGui::TextUnformatted("RuntimeOrchestrator unavailable.");
         ImGui::End();
         return;
     }
 
-    const bool masterParserOnly = m_runtimeOrchestrator->IsMasterParserOnlyMode();
+    const bool masterParserOnly = m_proxy->IsMasterParserOnlyMode();
     if (masterParserOnly) {
         ImGui::TextUnformatted("Master Parser Only is enabled.");
         ImGui::BeginDisabled();
@@ -412,7 +361,7 @@ void DiagnosticsWorkbench::DrawTouchTrackingPanel() {
 
     bool foundAny = false;
     int id = 2500;
-    for (const auto& p : m_runtimeOrchestrator->GetPipeline().GetProcessors()) {
+    for (const auto& p : m_proxy->GetPipeline().GetProcessors()) {
         if (dynamic_cast<Engine::TouchTracker*>(p.get()) ||
             dynamic_cast<Engine::CoordinateFilter*>(p.get())) {
             DrawProcessorConfigBlock(p.get(), id++);
@@ -427,33 +376,17 @@ void DiagnosticsWorkbench::DrawTouchTrackingPanel() {
         ImGui::EndDisabled();
     }
 
-    // --- Pipeline Latency Stats ---
+    // --- FPS Stats ---
     ImGui::Separator();
-    ImGui::TextUnformatted("Pipeline Latency");
-    if (m_runtimeOrchestrator) {
-        const int64_t lastUs = m_runtimeOrchestrator->GetLastFrameProcessUs();
-        const int64_t avgUs  = m_runtimeOrchestrator->GetAvgFrameProcessUs();
-        const float lastMs = lastUs / 1000.0f;
-        const float avgMs  = avgUs  / 1000.0f;
-
-        auto latencyColor = [](float ms) -> ImVec4 {
-            if (ms < 8.0f)  return ImVec4(0.2f, 0.9f, 0.2f, 1.f); // green
-            if (ms < 16.0f) return ImVec4(1.0f, 0.8f, 0.0f, 1.f); // yellow
-            return             ImVec4(1.0f, 0.3f, 0.3f, 1.f);       // red
-        };
-        ImGui::TextColored(latencyColor(lastMs),
-            "Last frame: %6.0f us  (%.2f ms)", (float)lastUs, lastMs);
-        ImGui::TextColored(latencyColor(avgMs),
-            "Avg  (16f): %6.0f us  (%.2f ms)", (float)avgUs,  avgMs);
-
-        // GetFrame 采集帧率
-        const int fps = m_runtimeOrchestrator->GetAcquisitionFps();
+    ImGui::TextUnformatted("Performance");
+    if (m_proxy) {
+        const int fps = m_proxy->GetAcquisitionFps();
         auto fpsColor = [](int f) -> ImVec4 {
-            if (f >= 100) return ImVec4(0.2f, 0.9f, 0.2f, 1.f); // green  ≥100Hz
-            if (f >=  50) return ImVec4(1.0f, 0.8f, 0.0f, 1.f); // yellow ≥50Hz
-            return            ImVec4(1.0f, 0.3f, 0.3f, 1.f);     // red    <50Hz
+            if (f >= 100) return ImVec4(0.2f, 0.9f, 0.2f, 1.f);
+            if (f >=  50) return ImVec4(1.0f, 0.8f, 0.0f, 1.f);
+            return            ImVec4(1.0f, 0.3f, 0.3f, 1.f);
         };
-        ImGui::TextColored(fpsColor(fps), "GetFrame FPS: %d Hz (32f avg)", fps);
+        ImGui::TextColored(fpsColor(fps), "Service Frame Rate: %d Hz", fps);
     }
 
     ImGui::End();
@@ -464,13 +397,13 @@ void DiagnosticsWorkbench::DrawStylusControlPanel() {
     ImGui::SetNextWindowSize(ImVec2(460, 640), ImGuiCond_FirstUseEver);
     ImGui::Begin("Stylus Pipeline Panel");
 
-    if (!m_runtimeOrchestrator) {
+    if (!m_proxy) {
         ImGui::TextUnformatted("RuntimeOrchestrator unavailable.");
         ImGui::End();
         return;
     }
 
-    const bool masterParserOnly = m_runtimeOrchestrator->IsMasterParserOnlyMode();
+    const bool masterParserOnly = m_proxy->IsMasterParserOnlyMode();
     if (masterParserOnly) {
         ImGui::TextUnformatted("Master Parser Only is enabled.");
         ImGui::BeginDisabled();
@@ -479,7 +412,7 @@ void DiagnosticsWorkbench::DrawStylusControlPanel() {
     bool foundAny = false;
     int id = 3000;
     Engine::TouchTracker* touchTracker = nullptr;
-    for (const auto& p : m_runtimeOrchestrator->GetPipeline().GetProcessors()) {
+    for (const auto& p : m_proxy->GetPipeline().GetProcessors()) {
         if (dynamic_cast<Engine::StylusProcessor*>(p.get())) {
             DrawProcessorConfigBlock(p.get(), id++);
             foundAny = true;
@@ -601,8 +534,8 @@ void DiagnosticsWorkbench::DrawHeatmap() {
     }
     
     // 绘制 FeatureExtractor (Phase 4.1/4.2) 提取到的 Peaks 和 Zones
-    if (m_runtimeOrchestrator) {
-        const auto& processors = m_runtimeOrchestrator->GetPipeline().GetProcessors();
+    if (m_proxy) {
+        const auto& processors = m_proxy->GetPipeline().GetProcessors();
         for (const auto& proc : processors) {
             // Find our FeatureExtractor in the pipeline
             if (auto extractor = dynamic_cast<Engine::FeatureExtractor*>(proc.get())) {

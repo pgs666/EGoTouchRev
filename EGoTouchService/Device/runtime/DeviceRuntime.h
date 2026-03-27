@@ -12,6 +12,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <functional>
 
 #include "Device.h"
 #include "himax/HimaxChip.h"
@@ -83,6 +84,10 @@ public:
     Engine::FramePipeline& GetPipeline() { return m_pipeline; }
     VhfReporter& GetVhfReporter() { return m_vhfReporter; }
 
+    // Frame push callback for IPC (called after pipeline+VHF in worker loop)
+    using FramePushCallback = std::function<void(const Engine::HeatmapFrame&)>;
+    void SetFramePushCallback(FramePushCallback cb) { m_framePushCb = std::move(cb); }
+
     void IngestSystemEvent(const Host::SystemStateEvent& ev);
     uint64_t SubmitCommand(command cmd, CommandSource src,
                            const char* reason = "");
@@ -129,6 +134,7 @@ private:
     uint64_t m_lastCmdId = 0;
     std::string m_lastNote;
     std::atomic<uint64_t> m_nextCmdId{1};
+    FramePushCallback m_framePushCb;
 
     std::atomic<bool> m_running{false};
     bool m_shutdownReq = false;

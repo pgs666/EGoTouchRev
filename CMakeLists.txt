@@ -18,7 +18,7 @@ option(HIMAX_ENABLE_NEON "Enable ARM NEON intrinsics when available" ON)
 # --- Common Library ---
 # Use the source directory as the root for subprojects/resources so paths
 # resolve correctly whether building in-tree or out-of-tree.
-set(COMMON_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/EGoTouchService/Common")
+set(COMMON_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Common")
 set(IMGUI_ROOT "${COMMON_ROOT}/imgui-docking")
 
 # Collect ImGui source files
@@ -45,6 +45,8 @@ target_include_directories(Common PUBLIC
     "${COMMON_ROOT}/include"
     "${IMGUI_ROOT}"
 )
+# Common links Engine for SharedFrameBuffer (EngineTypes.h)
+# Forward-declare include path; Engine target linked below after Engine is defined
 target_link_libraries(Common PUBLIC spdlog::spdlog)
 
 # --- Device Module (Hardware Abstraction) ---
@@ -106,6 +108,8 @@ target_include_directories(Engine PUBLIC
     "${ENGINE_ROOT}/Reporting"
 )
 target_link_libraries(Engine PUBLIC Common)
+# Let Common see Engine headers for SharedFrameBuffer
+target_include_directories(Common PUBLIC "${ENGINE_ROOT}")
 
 # --- Host Module (System Integration) ---
 set(HOST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/EGoTouchService/Host")

@@ -1,4 +1,4 @@
-[submodule "EGoTouchService/Common/imgui-docking"]
-	path = EGoTouchService/Common/imgui-docking
+[submodule "Common/imgui-docking"]
+	path = Common/imgui-docking
 	url = https://github.com/ocornut/imgui.git
 	branch = docking

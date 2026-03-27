@@ -227,6 +227,7 @@ void DeviceRuntime::OnStreaming() {
                          m_chip.back_data.end());
     m_pipeline.Execute(frame);
     m_vhfReporter.Dispatch(frame);
+    if (m_framePushCb) m_framePushCb(frame);
 }
 
 bool DeviceRuntime::OnQuit() {

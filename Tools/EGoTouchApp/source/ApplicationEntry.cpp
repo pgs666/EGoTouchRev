@@ -6,7 +6,7 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 
-#include "RuntimeOrchestrator.h"
+#include "ServiceProxy.h"
 #include "DiagnosticsWorkbench.h"
 #include "Logger.h"
 
@@ -36,16 +36,16 @@ int main(int, char**)
     Common::Logger::Init("EGoTouch");
     LOG_INFO("App", "wWinMain", "System", "--- EGoTouchApp (DX11) Starts ---");
 
-    // 1. 初始化驱动服务协调器
-    App::RuntimeOrchestrator runtimeOrchestrator;
-    if (!runtimeOrchestrator.Start()) {
-        LOG_ERROR("App", "wWinMain", "System", "Failed to start coordinator threads.");
+    // 1. 初始化 ServiceProxy（IPC 连接到 EGoTouchService）
+    App::ServiceProxy serviceProxy;
+    if (!serviceProxy.Connect()) {
+        LOG_ERROR("App", "wWinMain", "System", "Failed to connect to EGoTouchService.");
         Common::Logger::Shutdown();
         return 1;
     }
 
     // 2. 创建 GUI 调试界面对象
-    App::DiagnosticsWorkbench diagnosticsWorkbench(&runtimeOrchestrator);
+    App::DiagnosticsWorkbench diagnosticsWorkbench(&serviceProxy);
 
     // Create application window
     ImGui_ImplWin32_EnableDpiAwareness(); // 1. Fix DPI Issues on Multi-Monitor
@@ -138,7 +138,7 @@ int main(int, char**)
     }
 
     // Cleanup
-    runtimeOrchestrator.Stop();
+    serviceProxy.Disconnect();
 
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();

@@ -18,7 +18,7 @@ option(HIMAX_ENABLE_NEON "Enable ARM NEON intrinsics when available" ON)
 # --- Common Library ---
 # Use the source directory as the root for subprojects/resources so paths
 # resolve correctly whether building in-tree or out-of-tree.
-set(COMMON_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Common")
+set(COMMON_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/EGoTouchService/Common")
 set(IMGUI_ROOT "${COMMON_ROOT}/imgui-docking")
 
 # Collect ImGui source files
@@ -48,7 +48,7 @@ target_include_directories(Common PUBLIC
 target_link_libraries(Common PUBLIC spdlog::spdlog)
 
 # --- Device Module (Hardware Abstraction) ---
-set(DEVICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Device")
+set(DEVICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/EGoTouchService/Device")
 file(GLOB_RECURSE DEVICE_SOURCES "${DEVICE_ROOT}/*.cpp")
 file(GLOB_RECURSE DEVICE_HEADERS "${DEVICE_ROOT}/*.h")
 
@@ -68,30 +68,30 @@ target_include_directories(Device PUBLIC
 target_link_libraries(Device PUBLIC Common Host Engine)
 
 # --- Engine Module (Touch Algorithm) ---
-set(ENGINE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Engine")
+set(ENGINE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/EGoTouchService/Engine")
 
 add_library(Engine STATIC
     # Root (Infrastructure)
-    Engine/FramePipeline.cpp
+    EGoTouchService/Engine/FramePipeline.cpp
     # Preprocessing
-    Engine/Preprocessing/MasterFrameParser.cpp
-    Engine/Preprocessing/BaselineSubtraction.cpp
-    Engine/Preprocessing/CMFProcessor.cpp
-    Engine/Preprocessing/GridIIRProcessor.cpp
-    Engine/Preprocessing/SignalConditioningFilter.cpp
-    Engine/Preprocessing/GaussianFilter.cpp
+    EGoTouchService/Engine/Preprocessing/MasterFrameParser.cpp
+    EGoTouchService/Engine/Preprocessing/BaselineSubtraction.cpp
+    EGoTouchService/Engine/Preprocessing/CMFProcessor.cpp
+    EGoTouchService/Engine/Preprocessing/GridIIRProcessor.cpp
+    EGoTouchService/Engine/Preprocessing/SignalConditioningFilter.cpp
+    EGoTouchService/Engine/Preprocessing/GaussianFilter.cpp
     # TouchSolver
-    Engine/TouchSolver/PeakDetector.cpp
-    Engine/TouchSolver/ZoneExpander.cpp
-    Engine/TouchSolver/EdgeCompensation.cpp
-    Engine/TouchSolver/TouchSize.cpp
-    Engine/TouchSolver/EdgeRejection.cpp
-    Engine/TouchSolver/CoordinateFilter.cpp
-    Engine/TouchSolver/FeatureExtractor.cpp
+    EGoTouchService/Engine/TouchSolver/PeakDetector.cpp
+    EGoTouchService/Engine/TouchSolver/ZoneExpander.cpp
+    EGoTouchService/Engine/TouchSolver/EdgeCompensation.cpp
+    EGoTouchService/Engine/TouchSolver/TouchSize.cpp
+    EGoTouchService/Engine/TouchSolver/EdgeRejection.cpp
+    EGoTouchService/Engine/TouchSolver/CoordinateFilter.cpp
+    EGoTouchService/Engine/TouchSolver/FeatureExtractor.cpp
     # Reporting
-    Engine/Reporting/StylusProcessor.cpp
-    Engine/Reporting/TouchTracker.cpp
-    Engine/Reporting/TouchGestureStateMachine.cpp
+    EGoTouchService/Engine/Reporting/StylusProcessor.cpp
+    EGoTouchService/Engine/Reporting/TouchTracker.cpp
+    EGoTouchService/Engine/Reporting/TouchGestureStateMachine.cpp
 )
 
 target_compile_definitions(Engine PUBLIC
@@ -108,7 +108,7 @@ target_include_directories(Engine PUBLIC
 target_link_libraries(Engine PUBLIC Common)
 
 # --- Host Module (System Integration) ---
-set(HOST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Host")
+set(HOST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/EGoTouchService/Host")
 file(GLOB HOST_SOURCES "${HOST_ROOT}/source/*.cpp")
 file(GLOB HOST_HEADERS "${HOST_ROOT}/include/*.h")
 
@@ -122,31 +122,8 @@ if (WIN32)
     target_link_libraries(Host PUBLIC advapi32)
 endif()
 
-# --- Control Module (User-Mode Service Control Plane) ---
-set(CONTROL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Control")
-set(CONTROL_HEADERS
-    "${CONTROL_ROOT}/include/ControlTypes.h"
-    "${CONTROL_ROOT}/include/ControlRuntime.h"
-    "${CONTROL_ROOT}/include/ControlPipeServer.h"
-    "${CONTROL_ROOT}/include/ControlPipeClient.h"
-)
-set(CONTROL_SOURCES
-    "${CONTROL_ROOT}/source/ControlRuntime.cpp"
-    "${CONTROL_ROOT}/source/ControlPipeServer.cpp"
-    "${CONTROL_ROOT}/source/ControlPipeClient.cpp"
-)
-
-add_library(ControlRuntime STATIC
-    ${CONTROL_SOURCES}
-    ${CONTROL_HEADERS}
-)
-target_include_directories(ControlRuntime PUBLIC
-    "${CONTROL_ROOT}/include"
-)
-target_link_libraries(ControlRuntime PUBLIC Host Common)
-
-# --- App Module (Main & ServiceHost) ---
-set(APP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/App")
+# --- EGoTouchApp (Debug Diagnostics Workbench) ---
+set(APP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Tools/EGoTouchApp")
 file(GLOB APP_SOURCES "${APP_ROOT}/source/*.cpp")
 file(GLOB APP_HEADERS "${APP_ROOT}/include/*.h")
 
@@ -171,15 +148,7 @@ target_include_directories(EGoTouchApp PRIVATE
 # Link D3D11 for the ImGui DX11 backend
 target_link_libraries(EGoTouchApp PRIVATE Device Engine Host Common d3d11 d3dcompiler dwmapi setupapi)
 
-add_executable(EGoTouchControlService
-    "${CONTROL_ROOT}/app/ControlServiceMain.cpp"
-)
-target_include_directories(EGoTouchControlService PRIVATE
-    "${CONTROL_ROOT}/include"
-)
-target_link_libraries(EGoTouchControlService PRIVATE ControlRuntime Host Common)
-
-# --- EGoTouchService (New Service Shell) ---
+# --- EGoTouchService (Production Service Shell) ---
 set(SERVICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/EGoTouchService")
 
 add_executable(EGoTouchService
@@ -192,17 +161,9 @@ target_include_directories(EGoTouchService PRIVATE
 )
 target_link_libraries(EGoTouchService PRIVATE Device Host Common advapi32 setupapi)
 
-add_executable(EGoTouchControlServiceTestTool WIN32
-    "${CONTROL_ROOT}/app/ControlServiceTestTool.cpp"
-)
-target_include_directories(EGoTouchControlServiceTestTool PRIVATE
-    "${CONTROL_ROOT}/include"
-)
-target_link_libraries(EGoTouchControlServiceTestTool PRIVATE ControlRuntime user32 gdi32)
-
-# --- BTMCUTool (ImGui BT Protocol Validator) ---
+# --- BtMcuTestTool (ImGui BT Protocol Validator) ---
 add_executable(BtMcuTestTool
-    BTMCUTool/BtMcuTestTool.cpp
+    Tools/BtMcuTestTool/BtMcuTestTool.cpp
     ${IMGUI_BACKEND_SOURCES}
 )
 target_include_directories(BtMcuTestTool PRIVATE
@@ -216,13 +177,13 @@ target_link_libraries(BtMcuTestTool PRIVATE Device Common d3d11 d3dcompiler dwma
 option(EGO_BUILD_TESTS "Build local test executables" ON)
 if (EGO_BUILD_TESTS)
     add_executable(HostSystemStateMonitorTest
-        Host/tests/SystemStateMonitorNamedEventTest.cpp
+        Tools/tests/SystemStateMonitorNamedEventTest.cpp
     )
     target_include_directories(HostSystemStateMonitorTest PRIVATE "${HOST_ROOT}/include")
     target_link_libraries(HostSystemStateMonitorTest PRIVATE Host Common)
 
     add_executable(EngineRawdataBenchmarkTest
-        Engine/tests/RawdataBenchmarkTest.cpp
+        Tools/tests/RawdataBenchmarkTest.cpp
     )
     target_link_libraries(EngineRawdataBenchmarkTest PRIVATE Engine Common)
 endif()

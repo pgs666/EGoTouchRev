@@ -315,6 +315,8 @@ bool SharedFrameReader::Read(Engine::HeatmapFrame& out) {
     // Reconstruct rawData suffix for DrawMasterSuffixTable/DrawSlaveSuffixTable
     // We need rawData[4807..5062] for master and [5070..5401] for slave
     if (m_data->masterSuffixValid || m_data->slaveSuffixValid) {
+        // Pre-allocate rawData once (avoid per-frame heap alloc)
+        if (out.rawData.capacity() < 5402) out.rawData.reserve(5402);
         if (out.rawData.size() < 5402) out.rawData.resize(5402, 0);
         if (m_data->masterSuffixValid) {
             std::memcpy(out.rawData.data() + 4807,

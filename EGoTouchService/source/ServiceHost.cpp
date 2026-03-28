@@ -1,4 +1,5 @@
 #include "ServiceHost.h"
+#include "GuiLogSink.h"
 #include "Logger.h"
 #include "IpcProtocol.h"
 #include "IFrameProcessor.h"
@@ -118,6 +119,33 @@ void ServiceHost::BuildDefaultPipeline() {
     LOG_INFO("ServiceHost", "BuildDefaultPipeline", "Boot",
              "Registered {} pipeline processors.",
              pl.GetProcessors().size());
+
+    // Load saved config from config.ini
+    std::ifstream cfgIn("config.ini");
+    if (cfgIn.is_open()) {
+        std::string line, section;
+        Engine::IFrameProcessor* cur = nullptr;
+        while (std::getline(cfgIn, line)) {
+            if (line.empty() || line[0] == ';') continue;
+            if (line.front() == '[' && line.back() == ']') {
+                section = line.substr(1, line.size() - 2);
+                cur = nullptr;
+                for (auto& p : pl.GetProcessors()) {
+                    if (p->GetName() == section) {
+                        cur = p.get(); break;
+                    }
+                }
+            } else if (cur) {
+                auto eq = line.find('=');
+                if (eq != std::string::npos) {
+                    cur->LoadConfig(line.substr(0, eq),
+                                    line.substr(eq + 1));
+                }
+            }
+        }
+        LOG_INFO("ServiceHost", "BuildDefaultPipeline", "Boot",
+                 "Loaded config from config.ini.");
+    }
 }
 
 // ── IPC Command Handler ──────────────────────────────
@@ -245,6 +273,21 @@ Ipc::IpcResponse ServiceHost::HandleIpcCommand(
     case Ipc::IpcCommand::SetAutoAfeSync:
         resp.success = true; // placeholder — future DeviceRuntime integration
         break;
+
+    case Ipc::IpcCommand::GetLogs: {
+        auto lines = Common::GuiLogSink::Instance()->DrainNewLines();
+        std::string packed;
+        for (const auto& l : lines) {
+            if (packed.size() + l.size() + 1 > sizeof(resp.data)) break;
+            packed += l;
+            packed += '\n';
+        }
+        resp.dataLen = static_cast<uint16_t>(
+            std::min(packed.size(), sizeof(resp.data)));
+        std::memcpy(resp.data, packed.data(), resp.dataLen);
+        resp.success = true;
+        break;
+    }
 
     default:
         break;

@@ -24,6 +24,8 @@ enum class IpcCommand : uint8_t {
     // Config
     ReloadConfig   = 40,  // Force Service to re-read config.ini
     SaveConfig     = 41,  // Service saves current params to config.ini
+    // Logs
+    GetLogs        = 50,  // App requests recent log lines from Service
 };
 
 struct IpcRequest {
@@ -35,7 +37,7 @@ struct IpcRequest {
 struct IpcResponse {
     bool     success = false;
     uint16_t dataLen = 0;
-    uint8_t  data[256]{};
+    uint8_t  data[4096]{};
 };
 
 } // namespace Ipc

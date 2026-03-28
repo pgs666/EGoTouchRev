@@ -1,4 +1,5 @@
 #include "DiagnosticsWorkbench.h"
+#include "imgui_internal.h"
 #include "Device.h"
 #include "MasterFrameParser.h"
 #include "BaselineSubtraction.h"
@@ -49,43 +50,207 @@ DiagnosticsWorkbench::~DiagnosticsWorkbench() {
 
 // ... rest of the content up to DrawHeatmap
 void DiagnosticsWorkbench::Render() {
-    // 拉取最新的数据
+    // Fetch latest frame
     if (m_autoRefresh && m_renderVisualization && m_proxy) {
         m_proxy->GetLatestFrame(m_currentFrame);
     }
 
-    // Keyboard Hotkeys
-    if (ImGui::IsKeyPressed(ImGuiKey_F11)) {
-        m_fullscreen = !m_fullscreen;
-    }
-    if (m_fullscreen && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-        m_fullscreen = false;
-    }
+    // Hotkeys
+    if (ImGui::IsKeyPressed(ImGuiKey_F11)) m_fullscreen = !m_fullscreen;
+    if (m_fullscreen && ImGui::IsKeyPressed(ImGuiKey_Escape)) m_fullscreen = false;
 
-    // 绘制控制面板和热力图窗口
-    DrawControlPanel();
-    if (m_showTouchSolverPanel)   DrawTouchSolverPanel();
-    if (m_showTouchTrackingPanel) DrawTouchTrackingPanel();
-    if (m_showStylusControlPanel) DrawStylusControlPanel();
-    // [TEMPORARILY DISABLED] DrawStylusControlPanel();
-    if (m_renderVisualization) {
-        DrawHeatmap();
-        if (m_showTouchDebugPanel) {
-            DrawCoordinateTable();
-        }
-        // [TEMPORARILY DISABLED] stylus debug panel
-        // if (m_showStylusDebugPanel) {
-        //     DrawStylusPanel();
-        // }
-        if (m_showMasterSuffixTable) DrawMasterSuffixTable();
-        if (m_showSlaveSuffixTable)  DrawSlaveSuffixTable();
+    // ── Fullscreen DockSpace ──
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->WorkPos);
+    ImGui::SetNextWindowSize(vp->WorkSize);
+    ImGui::SetNextWindowViewport(vp->ID);
+    ImGuiWindowFlags hostFlags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoResize   | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoDocking  | ImGuiWindowFlags_NoBackground;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##DockspaceHost", nullptr, hostFlags);
+    ImGui::PopStyleVar(3);
+
+    ImGuiID dockId = ImGui::GetID("MainDockspace");
+    ImGui::DockSpace(dockId, ImVec2(0, 0),
+                     ImGuiDockNodeFlags_PassthruCentralNode);
+
+    // First-frame: build programmatic dock layout
+    if (!m_dockLayoutApplied) {
+        SetupDockLayout(dockId);
+        m_dockLayoutApplied = true;
     }
+    ImGui::End();
+
+    // ── Panels (each docked by name) ──
+    DrawControlPanel();
+    if (m_renderVisualization) DrawHeatmap();
+    DrawLogPanel();
+    DrawInspectorPanel();
+    DrawStatusBar();
+}
+
+void DiagnosticsWorkbench::SetupDockLayout(ImGuiID dockId) {
+    ImGui::DockBuilderRemoveNode(dockId);
+    ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockId, ImGui::GetMainViewport()->WorkSize);
+
+    // Split: left 20% | remainder
+    ImGuiID dockLeft, dockRemain;
+    ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.20f,
+                                &dockLeft, &dockRemain);
+    // Split remainder: center 65% | right 35%
+    ImGuiID dockCenter, dockRight;
+    ImGui::DockBuilderSplitNode(dockRemain, ImGuiDir_Right, 0.35f,
+                                &dockRight, &dockCenter);
+    // Split center: heatmap top 70% | log bottom 30%
+    ImGuiID dockHeatmap, dockLog;
+    ImGui::DockBuilderSplitNode(dockCenter, ImGuiDir_Down, 0.30f,
+                                &dockLog, &dockHeatmap);
+    // Split right: inspector top | status bottom
+    ImGuiID dockInspector, dockStatusArea;
+    ImGui::DockBuilderSplitNode(dockRight, ImGuiDir_Down, 0.06f,
+                                &dockStatusArea, &dockInspector);
+
+    ImGui::DockBuilderDockWindow("Control Panel", dockLeft);
+    ImGui::DockBuilderDockWindow("Heatmap", dockHeatmap);
+    ImGui::DockBuilderDockWindow("Log", dockLog);
+    ImGui::DockBuilderDockWindow("Inspector", dockInspector);
+    ImGui::DockBuilderDockWindow("Status", dockStatusArea);
+    ImGui::DockBuilderFinish(dockId);
+}
+
+void DiagnosticsWorkbench::DrawStatusBar() {
+    ImGui::Begin("Status", nullptr,
+                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar);
+    if (m_proxy) {
+        bool connected = m_proxy->IsConnected();
+        if (connected) {
+            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.f),
+                               "● Connected");
+        } else {
+            ImGui::TextColored(ImVec4(0.9f, 0.35f, 0.35f, 1.f),
+                               "● Disconnected");
+        }
+        ImGui::SameLine(0, 20);
+        ImGui::Text("FPS: %d", m_proxy->GetAcquisitionFps());
+        ImGui::SameLine(0, 20);
+        ImGui::Text("VHF: %s", m_proxy->IsVhfEnabled() ? "ON" : "OFF");
+        ImGui::SameLine(0, 20);
+        ImGui::Text("AFE Sync: %s",
+                     m_proxy->IsAutoAfeSyncEnabled() ? "ON" : "OFF");
+    } else {
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.f),
+                           "No ServiceProxy");
+    }
+    ImGui::End();
+}
+
+void DiagnosticsWorkbench::DrawLogPanel() {
+    ImGui::Begin("Log");
+    if (ImGui::BeginTabBar("LogTabs")) {
+        if (ImGui::BeginTabItem("Console")) {
+            if (ImGui::Button("Clear")) {
+                Common::GuiLogSink::Instance()->Clear();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%d lines)",
+                (int)Common::GuiLogSink::Instance()->GetLines().size());
+            ImGui::Separator();
+
+            ImGui::BeginChild("LogScroll", ImVec2(0, 0), false,
+                               ImGuiWindowFlags_HorizontalScrollbar);
+            auto lines = Common::GuiLogSink::Instance()->GetLines();
+            for (const auto& line : lines) {
+                ImVec4 col = ImVec4(0.75f, 0.75f, 0.75f, 1.f);
+                if (line.find("[error") != std::string::npos ||
+                    line.find("[critical") != std::string::npos) {
+                    col = ImVec4(1.0f, 0.35f, 0.35f, 1.f);
+                } else if (line.find("[warning") != std::string::npos) {
+                    col = ImVec4(1.0f, 0.8f, 0.3f, 1.f);
+                } else if (line.find("[info") != std::string::npos) {
+                    col = ImVec4(0.7f, 0.85f, 1.0f, 1.f);
+                }
+                ImGui::PushStyleColor(ImGuiCol_Text, col);
+                ImGui::TextUnformatted(line.c_str());
+                ImGui::PopStyleColor();
+            }
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20.f)
+                ImGui::SetScrollHereY(1.0f);
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Master Suffix")) {
+            DrawMasterSuffixTable();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Slave Suffix")) {
+            DrawSlaveSuffixTable();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    ImGui::End();
+}
+
+void DiagnosticsWorkbench::DrawInspectorPanel() {
+    ImGui::Begin("Inspector");
+    bool masterParserOnly = (m_proxy != nullptr) && m_proxy->IsMasterParserOnlyMode();
+    // Level 1: category tabs
+    if (ImGui::BeginTabBar("CategoryTabs")) {
+        if (ImGui::BeginTabItem("Preprocessing")) {
+            // Render preprocessing pipeline processors directly
+            if (m_proxy) {
+                if (masterParserOnly) ImGui::BeginDisabled();
+                int id = 2000;
+                for (const auto& p : m_proxy->GetPipeline().GetProcessors()) {
+                    if (dynamic_cast<Engine::MasterFrameParser*>(p.get()) ||
+                        dynamic_cast<Engine::BaselineSubtraction*>(p.get()) ||
+                        dynamic_cast<Engine::CMFProcessor*>(p.get()) ||
+                        dynamic_cast<Engine::GridIIRProcessor*>(p.get())) {
+                        DrawProcessorConfigBlock(p.get(), id++);
+                    }
+                }
+                if (masterParserOnly) ImGui::EndDisabled();
+            } else {
+                ImGui::TextUnformatted("ServiceProxy unavailable.");
+            }
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Touch")) {
+            // Level 2: sub-module tabs for touch
+            if (ImGui::BeginTabBar("TouchSubTabs")) {
+                if (ImGui::BeginTabItem("Solver (Feature Extraction)")) {
+                    DrawTouchSolverPanel();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Tracking & Report")) {
+                    DrawTouchTrackingPanel();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Coordinates")) {
+                    DrawCoordinateTable();
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Stylus")) {
+            DrawStylusControlPanel();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    ImGui::End();
 }
 
 void DiagnosticsWorkbench::DrawControlPanel() {
-    ImGui::SetNextWindowPos(ImVec2(100, 100), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(400, 800), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Device Control Panel");
+    ImGui::Begin("Control Panel");
     
     if (ImGui::Button("EXIT APPLICATION", ImVec2(-1, 30))) {
         if (m_proxy) {
@@ -261,15 +426,6 @@ void DiagnosticsWorkbench::DrawControlPanel() {
     }
     if (!m_proxy) ImGui::EndDisabled();
 
-    ImGui::Separator();
-    ImGui::TextUnformatted("Window Visibility");
-    ImGui::Checkbox("Touch Solver Panel",   &m_showTouchSolverPanel);
-    ImGui::Checkbox("Touch Tracking Panel", &m_showTouchTrackingPanel);
-    ImGui::Checkbox("Stylus Pipeline Panel",&m_showStylusControlPanel);
-    ImGui::Checkbox("Touch Debug Panel",    &m_showTouchDebugPanel);
-    ImGui::Checkbox("Stylus Debug Panel",   &m_showStylusDebugPanel);
-    ImGui::Checkbox("Master Suffix Table",  &m_showMasterSuffixTable);
-    ImGui::Checkbox("Slave Suffix Table",   &m_showSlaveSuffixTable);
 
     ImGui::Separator();
     
@@ -294,21 +450,7 @@ void DiagnosticsWorkbench::DrawControlPanel() {
     ImGui::Text("Auto-Capture (Debug)");
     ImGui::SliderInt("Target Peaks", &m_autoExportTargetPeaks, 0, 5, m_autoExportTargetPeaks == 0 ? "Disabled" : "%d Peaks");
     
-    if (m_proxy) {
-        ImGui::Separator();
-        ImGui::TextUnformatted("Common Preprocess Pipeline");
-        if (masterParserOnly) ImGui::BeginDisabled();
-        int id = 1000;
-        for (const auto& p : m_proxy->GetPipeline().GetProcessors()) {
-            if (dynamic_cast<Engine::MasterFrameParser*>(p.get()) ||
-                dynamic_cast<Engine::BaselineSubtraction*>(p.get()) ||
-                dynamic_cast<Engine::CMFProcessor*>(p.get()) ||
-                dynamic_cast<Engine::GridIIRProcessor*>(p.get())) {
-                DrawProcessorConfigBlock(p.get(), id++);
-            }
-        }
-        if (masterParserOnly) ImGui::EndDisabled();
-    }
+
 
     ImGui::Checkbox("Auto-refresh Heatmap", &m_autoRefresh);
     ImGui::Checkbox("Render Visualization", &m_renderVisualization);
@@ -323,13 +465,8 @@ void DiagnosticsWorkbench::DrawControlPanel() {
 }
 
 void DiagnosticsWorkbench::DrawTouchSolverPanel() {
-    ImGui::SetNextWindowPos(ImVec2(520, 100), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(430, 520), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Touch Solver Panel (Feature Extraction)");
-
     if (!m_proxy) {
-        ImGui::TextUnformatted("RuntimeOrchestrator unavailable.");
-        ImGui::End();
+        ImGui::TextUnformatted("ServiceProxy unavailable.");
         return;
     }
 
@@ -355,17 +492,12 @@ void DiagnosticsWorkbench::DrawTouchSolverPanel() {
         ImGui::EndDisabled();
     }
 
-    ImGui::End();
+
 }
 
 void DiagnosticsWorkbench::DrawTouchTrackingPanel() {
-    ImGui::SetNextWindowPos(ImVec2(520, 640), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(430, 520), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Touch Tracking/Report Panel");
-
     if (!m_proxy) {
-        ImGui::TextUnformatted("RuntimeOrchestrator unavailable.");
-        ImGui::End();
+        ImGui::TextUnformatted("ServiceProxy unavailable.");
         return;
     }
 
@@ -405,17 +537,12 @@ void DiagnosticsWorkbench::DrawTouchTrackingPanel() {
         ImGui::TextColored(fpsColor(fps), "Service Frame Rate: %d Hz", fps);
     }
 
-    ImGui::End();
+
 }
 
 void DiagnosticsWorkbench::DrawStylusControlPanel() {
-    ImGui::SetNextWindowPos(ImVec2(950, 100), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(460, 640), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Stylus Pipeline Panel");
-
     if (!m_proxy) {
-        ImGui::TextUnformatted("RuntimeOrchestrator unavailable.");
-        ImGui::End();
+        ImGui::TextUnformatted("ServiceProxy unavailable.");
         return;
     }
 
@@ -458,7 +585,7 @@ void DiagnosticsWorkbench::DrawStylusControlPanel() {
         ImGui::EndDisabled();
     }
 
-    ImGui::End();
+
 }
 
 void DiagnosticsWorkbench::DrawHeatmap() {
@@ -483,7 +610,7 @@ void DiagnosticsWorkbench::DrawHeatmap() {
         ImGui::SetNextWindowSize(ImVec2(600, 800), ImGuiCond_FirstUseEver);
     }
 
-    ImGui::Begin("Raw Heatmap Visualization (40x60)", nullptr, window_flags);
+    ImGui::Begin("Heatmap", nullptr, window_flags);
     
     // In multi-viewport mode, if the window is outside, GetContentRegionAvail might refer to its own OS window
     ImVec2 canvas_sz = ImGui::GetContentRegionAvail();
@@ -699,9 +826,6 @@ void DiagnosticsWorkbench::DrawHeatmap() {
 }
 
 void DiagnosticsWorkbench::DrawCoordinateTable() {
-    ImGui::SetNextWindowPos(ImVec2(550, 930), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(620, 300), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Touch Debug (Parsed Coordinates)");
 
     if (m_currentFrame.contacts.empty()) {
         ImGui::Text("No touches detected.");
@@ -822,7 +946,7 @@ void DiagnosticsWorkbench::DrawCoordinateTable() {
     drawTouchPacket("TouchPacket[0]", m_currentFrame.touchPackets[0]);
     drawTouchPacket("TouchPacket[1]", m_currentFrame.touchPackets[1]);
 
-    ImGui::End();
+
 }
 
 void DiagnosticsWorkbench::DrawStylusPanel() {
@@ -935,7 +1059,6 @@ void DiagnosticsWorkbench::DrawStylusPanel() {
 }
 
 void DiagnosticsWorkbench::DrawMasterSuffixTable() {
-    ImGui::Begin("Master Frame Suffix (128 words)");
     if (m_currentFrame.rawData.size() >= 5063) {
         if (ImGui::BeginTable("MasterSuffixTable", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
             const uint8_t* ptr = m_currentFrame.rawData.data() + 4807;
@@ -950,11 +1073,10 @@ void DiagnosticsWorkbench::DrawMasterSuffixTable() {
     } else {
         ImGui::Text("Insufficient frame data length.");
     }
-    ImGui::End();
+
 }
 
 void DiagnosticsWorkbench::DrawSlaveSuffixTable() {
-    ImGui::Begin("Slave Frame Suffix (166 words)");
     if (m_currentFrame.rawData.size() >= 5402) { // 5063 + 339 = 5402
         if (ImGui::BeginTable("SlaveSuffixTable", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
             const uint8_t* ptr = m_currentFrame.rawData.data() + 5070; // 5063 + 7
@@ -969,7 +1091,7 @@ void DiagnosticsWorkbench::DrawSlaveSuffixTable() {
     } else {
         ImGui::Text("Insufficient slave overlay data length.");
     }
-    ImGui::End();
+
 }
 
 void DiagnosticsWorkbench::ExportCurrentFrameToCSV(bool isAutoCapture) {

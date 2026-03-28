@@ -8,6 +8,7 @@
 
 #include "ServiceProxy.h"
 #include "DiagnosticsWorkbench.h"
+#include "GuiLogSink.h"
 #include "Logger.h"
 
 
@@ -34,6 +35,9 @@ int main(int, char**)
     freopen_s(&dummy, "CONOUT$", "w", stderr);
     // 启动日志框架
     Common::Logger::Init("EGoTouch");
+    // Register GUI log sink so App logs appear in the terminal panel
+    auto guiSink = Common::GuiLogSink::Instance();
+    Common::Logger::Get()->sinks().push_back(guiSink);
     LOG_INFO("App", "wWinMain", "System", "--- EGoTouchApp (DX11) Starts ---");
 
     // 1. 创建 ServiceProxy（后台自动发现 Service）
@@ -48,9 +52,13 @@ int main(int, char**)
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"EGoTouchApp", nullptr };
     ::RegisterClassExW(&wc);
     
-    // 2. Hide Main Window: Create as WS_POPUP and WS_EX_TOOLWINDOW off-screen
-    HWND hwnd = ::CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"EGoTouch Diagnostics (Hidden Main)", WS_POPUP, 
-                                  -10000, -10000, 100, 100, nullptr, nullptr, wc.hInstance, nullptr);
+    // 2. Create main window (visible, maximized for DockSpace host)
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    HWND hwnd = ::CreateWindowExW(0, wc.lpszClassName,
+        L"EGoTouch Diagnostics", WS_OVERLAPPEDWINDOW,
+        0, 0, screenW, screenH,
+        nullptr, nullptr, wc.hInstance, nullptr);
 
     // Initialize Direct3D
     if (!CreateDeviceD3D(hwnd))
@@ -60,8 +68,8 @@ int main(int, char**)
         return 1;
     }
 
-    // Hide the main window completely so user just sees the floating ImGui windows
-    ::ShowWindow(hwnd, SW_HIDE);
+    // Show maximized
+    ::ShowWindow(hwnd, SW_SHOWMAXIMIZED);
     ::UpdateWindow(hwnd);
 
     // Setup Dear ImGui context
@@ -75,8 +83,58 @@ int main(int, char**)
     io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports; // Enable secondary viewport DPI scaling
     io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleFonts;     // Enable DPI scaled fonts
     
-    // Setup Dear ImGui style
+    // Setup Dear ImGui style — Custom Engineering Dark Theme
     ImGui::StyleColorsDark();
+    {
+        auto& style = ImGui::GetStyle();
+        style.WindowRounding    = 4.0f;
+        style.FrameRounding     = 3.0f;
+        style.GrabRounding      = 2.0f;
+        style.TabRounding       = 3.0f;
+        style.ScrollbarRounding = 4.0f;
+        style.WindowPadding     = ImVec2(8, 8);
+        style.FramePadding      = ImVec2(6, 4);
+        style.ItemSpacing       = ImVec2(8, 4);
+        style.TabBarBorderSize  = 1.0f;
+
+        auto& c = style.Colors;
+        // Backgrounds
+        c[ImGuiCol_WindowBg]        = ImVec4(0.10f, 0.10f, 0.12f, 1.00f);
+        c[ImGuiCol_ChildBg]         = ImVec4(0.10f, 0.10f, 0.12f, 1.00f);
+        c[ImGuiCol_PopupBg]         = ImVec4(0.12f, 0.12f, 0.14f, 0.96f);
+        // Borders
+        c[ImGuiCol_Border]          = ImVec4(0.25f, 0.25f, 0.28f, 0.80f);
+        // Title bar
+        c[ImGuiCol_TitleBg]         = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
+        c[ImGuiCol_TitleBgActive]   = ImVec4(0.12f, 0.14f, 0.18f, 1.00f);
+        // Tabs
+        c[ImGuiCol_Tab]             = ImVec4(0.14f, 0.14f, 0.16f, 1.00f);
+        c[ImGuiCol_TabHovered]      = ImVec4(0.24f, 0.52f, 0.72f, 0.80f);
+        c[ImGuiCol_TabSelected]     = ImVec4(0.18f, 0.40f, 0.58f, 1.00f);
+        // Frames / inputs
+        c[ImGuiCol_FrameBg]         = ImVec4(0.14f, 0.14f, 0.16f, 1.00f);
+        c[ImGuiCol_FrameBgHovered]  = ImVec4(0.22f, 0.22f, 0.26f, 1.00f);
+        c[ImGuiCol_FrameBgActive]   = ImVec4(0.18f, 0.36f, 0.52f, 0.67f);
+        // Buttons — cyan accent
+        c[ImGuiCol_Button]          = ImVec4(0.16f, 0.34f, 0.48f, 1.00f);
+        c[ImGuiCol_ButtonHovered]   = ImVec4(0.22f, 0.48f, 0.64f, 1.00f);
+        c[ImGuiCol_ButtonActive]    = ImVec4(0.12f, 0.30f, 0.42f, 1.00f);
+        // Headers (collapsing headers, menu)
+        c[ImGuiCol_Header]          = ImVec4(0.16f, 0.34f, 0.48f, 0.50f);
+        c[ImGuiCol_HeaderHovered]   = ImVec4(0.22f, 0.48f, 0.64f, 0.80f);
+        c[ImGuiCol_HeaderActive]    = ImVec4(0.18f, 0.40f, 0.58f, 1.00f);
+        // Scrollbar
+        c[ImGuiCol_ScrollbarBg]     = ImVec4(0.08f, 0.08f, 0.10f, 0.60f);
+        c[ImGuiCol_ScrollbarGrab]   = ImVec4(0.30f, 0.30f, 0.34f, 1.00f);
+        // Separator
+        c[ImGuiCol_Separator]       = ImVec4(0.22f, 0.22f, 0.26f, 1.00f);
+        // Checkbox / SliderGrab
+        c[ImGuiCol_CheckMark]       = ImVec4(0.30f, 0.70f, 0.90f, 1.00f);
+        c[ImGuiCol_SliderGrab]      = ImVec4(0.24f, 0.52f, 0.72f, 1.00f);
+        c[ImGuiCol_SliderGrabActive]= ImVec4(0.30f, 0.60f, 0.80f, 1.00f);
+        // DockingPreview
+        c[ImGuiCol_DockingPreview]  = ImVec4(0.24f, 0.52f, 0.72f, 0.70f);
+    }
 
     // Setup Platform/Renderer backends
     ImGui_ImplWin32_Init(hwnd);

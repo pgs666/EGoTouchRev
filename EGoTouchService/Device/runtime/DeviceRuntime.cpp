@@ -42,8 +42,10 @@ DeviceRuntime::~DeviceRuntime() { Stop(); }
 
 bool DeviceRuntime::Start() {
     if (m_running.exchange(true)) return false;
+    m_stopReq.store(false);       // ← critical: clear stop flag for restart
     m_state.store(workerState::ready);
     m_shutdownReq = false;
+    m_recoverCount = 0;
     m_lastNote = "Runtime started";
     m_thread = std::thread(&DeviceRuntime::WorkerMain, this);
     LOG_INFO("Device", "DeviceRuntime::Start", "ready",

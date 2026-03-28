@@ -3,11 +3,13 @@
 
 #include "ServiceShell.h"
 #include "Logger.h"
+#include "GuiLogSink.h"
 
 #include <string_view>
 
 int wmain(int argc, wchar_t* argv[]) {
     Common::Logger::Init("EGoTouchService");
+    Common::Logger::Get()->sinks().push_back(Common::GuiLogSink::Instance());
 
     const bool consoleMode =
         (argc >= 2 && std::wstring_view(argv[1]) == L"--console");

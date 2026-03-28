@@ -905,20 +905,33 @@ bool Chip::isFingerDetected() const {
     uint16_t touch_x = readU16(kTouchXWord);
     uint16_t touch_y = readU16(kTouchYWord);
 
-    // 固件无触点时 xy 均为 0xFF（即 u16 低字节 0xFF）
-    return !((touch_x & 0xFF) == 0xFF && (touch_y & 0xFF) == 0xFF);
+    bool detected = !((touch_x & 0xFF) == 0xFF && (touch_y & 0xFF) == 0xFF);
+
+    // 调试：每 120 帧打一条日志（约每秒一次）
+    static uint32_t s_logCounter = 0;
+    if ((s_logCounter++ % 120) == 0) {
+        LOG_INFO("Device", "Chip::isFingerDetected", "diag",
+                 "touch_x=0x{:04X} touch_y=0x{:04X} detected={}  "
+                 "raw[4915]={:02X} raw[4916]={:02X} raw[4917]={:02X} raw[4918]={:02X}",
+                 touch_x, touch_y, detected ? 1 : 0,
+                 back_data[4915], back_data[4916], back_data[4917], back_data[4918]);
+    }
+
+    return detected;
 }
 
 /**
  * @brief 检测是否有手写笔输入
  * 
- * Slave 帧起始于 back_data[5063]。字节 [0] 是校验位，
- * 字节 [1] 和 [2] 是手写笔状态（与 master 的 xy==0xFF 判定一致）。
+ * Slave 帧起始于 back_data[5063]，共 339 字节。
+ * 与 master 帧一样有 7 字节校验头，真正的状态从第 8 字节起。
+ * 字段 1-2（byte[7] / byte[8]）用于手写笔存在判定，0xFF=无笔。
  */
 bool Chip::isStylusDetected() const {
     constexpr size_t kSlaveOffset = 5063;
-    const uint8_t b1 = back_data[kSlaveOffset + 1];
-    const uint8_t b2 = back_data[kSlaveOffset + 2];
+    constexpr size_t kHeaderSize  = 7;    // 与 master 一致的校验头
+    const uint8_t b1 = back_data[kSlaveOffset + kHeaderSize];      // 字段 1
+    const uint8_t b2 = back_data[kSlaveOffset + kHeaderSize + 1];  // 字段 2
     return !(b1 == 0xFF && b2 == 0xFF);
 }
 
@@ -926,7 +939,7 @@ ChipResult<> Chip::GetFrame(void) {
 
     // ── Idle 模式：500ms 睡眠后做一次帧获取检测唤醒 ──────────
     if (afe_mode.load() == THP_AFE_MODE::Idle) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         // 尝试读一帧用于唤醒检测（master + slave）
         auto m_res = m_master->GetFrame(back_data.data(), 5063, nullptr);
@@ -982,6 +995,14 @@ ChipResult<> Chip::GetFrame(void) {
             (void)thp_afe_enter_idle();
             m_zeroFrameCount = 0;
         }
+    }
+
+    // 调试：每 600 帧打计数日志
+    if ((m_frameCount % 600) == 0) {
+        LOG_INFO("Device", "Chip::GetFrame", GetStateStr(),
+                 "[IDLE-DIAG] m_frameCount={} m_zeroFrameCount={} afe_mode={}",
+                 m_frameCount, m_zeroFrameCount,
+                 afe_mode.load() == THP_AFE_MODE::Idle ? "Idle" : "Normal");
     }
 
     return {};

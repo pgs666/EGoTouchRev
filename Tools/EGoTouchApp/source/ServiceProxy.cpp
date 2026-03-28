@@ -1,7 +1,9 @@
 #include "ServiceProxy.h"
 #include "Logger.h"
+#include "GuiLogSink.h"
 #include "IFrameProcessor.h"
 #include "IpcProtocol.h"
+#include <sstream>
 
 // Pipeline Processors (local copy for GUI parameter editing)
 #include "MasterFrameParser.h"
@@ -276,29 +278,57 @@ void ServiceProxy::TriggerDVRExport(bool heatmap, bool master, bool slave) {
 
 // ── Poll loop with FPS measurement ──
 void ServiceProxy::PollLoop() {
-    Engine::HeatmapFrame tempFrame;
-    int frameCount = 0;
+    m_latestFrame.rawData.reserve(5402);
+
+    uint64_t lastFpsFrameId = m_frameReader.LastFrameId();
     auto lastFpsTick = std::chrono::steady_clock::now();
+    auto lastLogPoll = std::chrono::steady_clock::now();
     while (m_polling.load()) {
-        if (m_frameReader.Read(tempFrame)) {
-            // DVR recording
-            if (m_dvrBuffer) m_dvrBuffer->PushOverwriting(tempFrame);
-            {
-                std::lock_guard<std::mutex> lk(m_frameMutex);
-                m_latestFrame = tempFrame;
-                m_hasNewFrame.store(true);
+        bool gotFrame = false;
+        {
+            std::lock_guard<std::mutex> lk(m_frameMutex);
+            if (m_frameReader.Read(m_latestFrame)) {
+                m_hasNewFrame.store(true, std::memory_order_release);
+                gotFrame = true;
             }
-            ++frameCount;
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<
-                std::chrono::milliseconds>(now - lastFpsTick);
-            if (elapsed.count() >= 1000) {
-                m_fps.store(frameCount);
-                frameCount = 0;
-                lastFpsTick = now;
+        }
+        if (gotFrame) {
+            if (m_dvrBuffer) {
+                m_dvrBuffer->PushOverwriting(m_latestFrame);
             }
-        } else {
-            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+        auto now = std::chrono::steady_clock::now();
+        // FPS counter
+        auto fpsElapsed = std::chrono::duration_cast<
+            std::chrono::milliseconds>(now - lastFpsTick);
+        if (fpsElapsed.count() >= 1000) {
+            uint64_t currentId = m_frameReader.LastFrameId();
+            m_fps.store(static_cast<int>(currentId - lastFpsFrameId));
+            lastFpsFrameId = currentId;
+            lastFpsTick = now;
+        }
+        // Service log polling (~every 1s)
+        auto logElapsed = std::chrono::duration_cast<
+            std::chrono::milliseconds>(now - lastLogPoll);
+        if (logElapsed.count() >= 1000 && m_client.IsConnected()) {
+            Ipc::IpcRequest req{};
+            req.command = Ipc::IpcCommand::GetLogs;
+            auto resp = m_client.Send(req);
+            if (resp.success && resp.dataLen > 0) {
+                std::string packed(
+                    reinterpret_cast<const char*>(resp.data), resp.dataLen);
+                std::istringstream iss(packed);
+                std::string line;
+                while (std::getline(iss, line)) {
+                    if (!line.empty()) {
+                        LOG_INFO("Service", "RemoteLog", "IPC", "{}", line);
+                    }
+                }
+            }
+            lastLogPoll = now;
+        }
+        if (!gotFrame) {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     }
 }

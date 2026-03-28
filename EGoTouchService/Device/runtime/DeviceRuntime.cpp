@@ -96,13 +96,25 @@ void DeviceRuntime::IngestSystemEvent(
     using ET = Host::SystemStateEventType;
     switch (ev.type) {
     case ET::DisplayOff:
+    case ET::LidOff:
+        LOG_INFO("Device", "IngestSystemEvent", "Policy",
+                 "Sleep event ({}), requesting worker stop.",
+                 Host::ToString(ev.type));
         m_stopReq.store(true);
         break;
     case ET::DisplayOn:
+    case ET::LidOn:
     case ET::ResumeAutomatic:
-        if (!m_running.load()) Start();
+        LOG_INFO("Device", "IngestSystemEvent", "Policy",
+                 "Wake event ({}), attempting restart.",
+                 Host::ToString(ev.type));
+        // Ensure old worker thread is fully joined before restarting
+        Stop();
+        Start();
         break;
     case ET::Shutdown:
+        LOG_INFO("Device", "IngestSystemEvent", "Policy",
+                 "Shutdown event, requesting termination.");
         m_shutdownReq = true;
         m_stopReq.store(true);
         break;
@@ -195,7 +207,12 @@ ThreadResult DeviceRuntime::WorkerMain() {
         case workerState::streaming: OnStreaming();  break;
         case workerState::recover:   OnRecover();   break;
         case workerState::quit:
-            if (OnQuit()) return ThreadResult();
+            if (OnQuit()) {
+                m_running.store(false);  // allow restart via Start()
+                LOG_INFO("Device", "WorkerMain", "quit",
+                         "Worker exited, m_running=false.");
+                return ThreadResult();
+            }
             break;
         }
     }
@@ -224,12 +241,27 @@ void DeviceRuntime::OnStreaming() {
         return;
     }
 
-    Engine::HeatmapFrame frame;
-    frame.rawData.assign(m_chip.back_data.begin(),
-                         m_chip.back_data.end());
-    m_pipeline.Execute(frame);
-    m_vhfReporter.Dispatch(frame);
-    if (m_framePushCb) m_framePushCb(frame);
+    const auto& rawData = m_chip.back_data;
+
+    // 1. Stylus pipeline (independent, works directly from slave frame)
+    Engine::StylusPacket stylusPacket{};
+    m_stylusPipeline.Process(
+        std::span<const uint8_t>(rawData.data(), rawData.size()),
+        stylusPacket);
+    // m_vhfReporter.DispatchStylus(stylusPacket);  // disabled for debugging
+
+    // 2. Touch pipeline (independent, works from master frame)
+    Engine::HeatmapFrame touchFrame;
+    touchFrame.rawData.assign(rawData.begin(), rawData.end());
+    m_touchPipeline.Execute(touchFrame);
+    m_vhfReporter.DispatchTouch(touchFrame);
+
+    // 3. Merge results for UI push
+    if (m_framePushCb) {
+        touchFrame.stylus = m_stylusPipeline.GetLastResult();
+        touchFrame.stylus.packet = stylusPacket;
+        m_framePushCb(touchFrame);
+    }
 }
 
 bool DeviceRuntime::OnQuit() {

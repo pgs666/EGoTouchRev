@@ -28,16 +28,9 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 int main(int, char**)
 {
-    // 启用控制台以供测试输出
-    AllocConsole();
-    FILE* dummy;
-    freopen_s(&dummy, "CONOUT$", "w", stdout);
-    freopen_s(&dummy, "CONOUT$", "w", stderr);
-    // 启动日志框架
-    Common::Logger::Init("EGoTouch");
-    // Register GUI log sink so App logs appear in the terminal panel
-    auto guiSink = Common::GuiLogSink::Instance();
-    Common::Logger::Get()->sinks().push_back(guiSink);
+    // 启动日志框架 (所有日志通过 GuiLogSink 在 Log 面板显示)
+    Common::Logger::Init("EGoTouch", "C:/ProgramData/EGoTouchRev/logs/",
+                          Common::GuiLogSink::Instance());
     LOG_INFO("App", "wWinMain", "System", "--- EGoTouchApp (DX11) Starts ---");
 
     // 1. 创建 ServiceProxy（后台自动发现 Service）

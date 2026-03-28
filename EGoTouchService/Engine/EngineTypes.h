@@ -151,6 +151,13 @@ struct StylusFrameData {
 
     StylusSolvePoint point{};
     StylusPacket packet{};
+
+    // Phase 6: AnimationProcess state output (Idle/PenDown/Writing/Lifting)
+    uint8_t animState = 0;
+
+    // Diagnostic: which pipeline stage produced this result
+    // 0=ok, 1=slaveParseFail, 2=tx1Invalid, 3=noPeak, 4=coordFail, 5=noiseReject
+    uint8_t pipelineStage = 0;
 };
 
 // 整个管线中流转的帧结构体

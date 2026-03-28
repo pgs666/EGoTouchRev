@@ -137,6 +137,7 @@ void SharedFrameWriter::Write(const Engine::HeatmapFrame& frame) {
     m_data->stylusSignalY = s.signalY;
     m_data->stylusMaxRawPeak = s.maxRawPeak;
     m_data->stylusNoPressInk = s.noPressInkActive;
+    m_data->stylusPipelineStage = s.pipelineStage;
 
     // Raw suffix data from rawData
     if (frame.rawData.size() >= 5063) {
@@ -311,6 +312,7 @@ bool SharedFrameReader::Read(Engine::HeatmapFrame& out) {
     os.signalY = m_data->stylusSignalY;
     os.maxRawPeak = m_data->stylusMaxRawPeak;
     os.noPressInkActive = m_data->stylusNoPressInk;
+    os.pipelineStage = m_data->stylusPipelineStage;
 
     // Reconstruct rawData suffix for DrawMasterSuffixTable/DrawSlaveSuffixTable
     // We need rawData[4807..5062] for master and [5070..5401] for slave

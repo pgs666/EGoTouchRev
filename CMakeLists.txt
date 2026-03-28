@@ -94,6 +94,11 @@ add_library(Engine STATIC
     EGoTouchService/Engine/Reporting/StylusProcessor.cpp
     EGoTouchService/Engine/Reporting/TouchTracker.cpp
     EGoTouchService/Engine/Reporting/TouchGestureStateMachine.cpp
+    # StylusSolver (official ASA pipeline)
+    EGoTouchService/Engine/StylusSolver/GridPeakDetector.cpp
+    EGoTouchService/Engine/StylusSolver/CoordinateSolver.cpp
+    EGoTouchService/Engine/StylusSolver/CoorPostProcessor.cpp
+    EGoTouchService/Engine/StylusSolver/StylusPipeline.cpp
 )
 
 target_compile_definitions(Engine PUBLIC
@@ -106,6 +111,7 @@ target_include_directories(Engine PUBLIC
     "${ENGINE_ROOT}/Preprocessing"
     "${ENGINE_ROOT}/TouchSolver"
     "${ENGINE_ROOT}/Reporting"
+    "${ENGINE_ROOT}/StylusSolver"
 )
 target_link_libraries(Engine PUBLIC Common)
 # Let Common see Engine headers for SharedFrameBuffer

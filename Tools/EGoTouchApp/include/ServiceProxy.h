@@ -7,6 +7,7 @@
 #include "ConfigSync.h"
 #include "EngineTypes.h"
 #include "FramePipeline.h"
+#include "StylusPipeline.h"
 #include "ConcurrentRingBuffer.h"
 #include <atomic>
 #include <mutex>
@@ -39,6 +40,7 @@ public:
 
     // Pipeline for GUI config UI (local copy)
     Engine::FramePipeline& GetPipeline() { return m_pipeline; }
+    Engine::StylusPipeline& GetStylusPipeline() { return m_stylusPipeline; }
 
     // Remote commands
     bool SwitchAfeMode(uint8_t afeCmd, uint8_t param = 0);
@@ -79,6 +81,7 @@ private:
     Ipc::SharedFrameReader m_frameReader;
     Ipc::ConfigDirtyFlag  m_configDirty;
     Engine::FramePipeline m_pipeline;
+    Engine::StylusPipeline m_stylusPipeline;
 
     // Latest frame snapshot for GUI
     std::mutex m_frameMutex;

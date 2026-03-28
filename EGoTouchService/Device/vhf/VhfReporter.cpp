@@ -48,7 +48,7 @@ bool VhfReporter::IsDeviceOpen() const {
     return m_handle != INVALID_HANDLE_VALUE;
 }
 
-// ── 主入口 ──
+// ── 主入口 (legacy) ──
 
 void VhfReporter::Dispatch(Engine::HeatmapFrame& frame) {
     if (!m_enabled.load()) return;
@@ -88,6 +88,57 @@ void VhfReporter::Dispatch(Engine::HeatmapFrame& frame) {
         WritePacket(frame.stylus.packet.bytes.data(),
                     frame.stylus.packet.length, "stylus");
     }
+}
+
+// ── 独立手写笔写入 ──
+
+void VhfReporter::DispatchStylus(const Engine::StylusPacket& packet) {
+    if (!m_enabled.load()) return;
+    if (!packet.valid) return;
+
+    std::lock_guard<std::mutex> lk(m_mu);
+    if (!EnsureDeviceOpen()) return;
+
+    // Copy and apply post-transform
+    auto bytes = packet.bytes;
+    ApplyStylusPostTransform(bytes);
+    WritePacket(bytes.data(), packet.length, "stylus");
+}
+
+// ── 独立手指写入 ──
+
+void VhfReporter::DispatchTouch(Engine::HeatmapFrame& frame) {
+    if (!m_enabled.load()) return;
+
+    BuildTouchReports(frame);
+
+    const bool hasTouch =
+        frame.touchPackets[0].valid || frame.touchPackets[1].valid;
+
+    if (!hasTouch) {
+        if (m_hadTouchLastFrame.exchange(false)) {
+            std::lock_guard<std::mutex> lk(m_mu);
+            if (EnsureDeviceOpen()) {
+                Engine::TouchPacket allUp{};
+                allUp.bytes.fill(0);
+                allUp.bytes[0] = 0x01;
+                WritePacket(allUp.bytes.data(), allUp.length,
+                            "touch-all-up");
+            }
+        }
+        return;
+    }
+    m_hadTouchLastFrame.store(true);
+
+    std::lock_guard<std::mutex> lk(m_mu);
+    if (!EnsureDeviceOpen()) return;
+
+    if (frame.touchPackets[0].valid)
+        WritePacket(frame.touchPackets[0].bytes.data(),
+                    frame.touchPackets[0].length, "touch-0");
+    if (frame.touchPackets[1].valid)
+        WritePacket(frame.touchPackets[1].bytes.data(),
+                    frame.touchPackets[1].length, "touch-1");
 }
 
 // ── Touch 报告构建 ──

@@ -8,8 +8,11 @@
 #include <string_view>
 
 int wmain(int argc, wchar_t* argv[]) {
-    Common::Logger::Init("EGoTouchService");
-    Common::Logger::Get()->sinks().push_back(Common::GuiLogSink::Instance());
+    // Hide console window — logs are forwarded to App via IPC GetLogs
+    if (HWND hw = GetConsoleWindow()) ShowWindow(hw, SW_HIDE);
+
+    Common::Logger::Init("EGoTouchService", "C:/ProgramData/EGoTouchRev/logs/",
+                          Common::GuiLogSink::Instance());
 
     const bool consoleMode =
         (argc >= 2 && std::wstring_view(argv[1]) == L"--console");

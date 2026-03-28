@@ -9,7 +9,7 @@ namespace Common {
 
 std::shared_ptr<spdlog::logger> Logger::s_logger = nullptr;
 
-void Logger::Init(const std::string& loggerName, const std::filesystem::path& logDir) {
+void Logger::Init(const std::string& loggerName, const std::filesystem::path& logDir, spdlog::sink_ptr extraSink) {
     if (s_logger != nullptr) {
         return; // Already initialized
     }
@@ -39,6 +39,7 @@ void Logger::Init(const std::string& loggerName, const std::filesystem::path& lo
         file_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%-7l] %v");
 
         std::vector<spdlog::sink_ptr> sinks {console_sink, file_sink};
+        if (extraSink) sinks.push_back(extraSink);
 
         // 创建异步 Logger
         s_logger = std::make_shared<spdlog::async_logger>(

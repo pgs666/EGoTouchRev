@@ -19,6 +19,7 @@
 #include "SystemStateEvent.h"
 #include "FramePipeline.h"
 #include "vhf/VhfReporter.h"
+#include "StylusSolver/StylusPipeline.h"
 
 // --------------- 基础类型 ---------------
 
@@ -81,7 +82,10 @@ public:
     bool IsAutoMode() const { return m_autoMode.load(); }
 
     // Pipeline / VHF 配置 — 仅在 Start() 前调用
-    Engine::FramePipeline& GetPipeline() { return m_pipeline; }
+    Engine::FramePipeline& GetTouchPipeline() { return m_touchPipeline; }
+    // Legacy alias
+    Engine::FramePipeline& GetPipeline() { return m_touchPipeline; }
+    Engine::StylusPipeline& GetStylusPipeline() { return m_stylusPipeline; }
     VhfReporter& GetVhfReporter() { return m_vhfReporter; }
 
     // Frame push callback for IPC (called after pipeline+VHF in worker loop)
@@ -121,7 +125,8 @@ private:
     std::atomic<bool> m_stopReq{false};
     std::atomic<bool> m_autoMode{false};
     Himax::Chip m_chip;
-    Engine::FramePipeline m_pipeline;
+    Engine::FramePipeline m_touchPipeline;
+    Engine::StylusPipeline m_stylusPipeline;
     VhfReporter m_vhfReporter;
     uint8_t m_recoverCount = 0;
 

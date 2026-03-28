@@ -11,7 +11,6 @@
 #include "CMFProcessor.h"
 #include "GridIIRProcessor.h"
 #include "FeatureExtractor.h"
-#include "StylusProcessor.h"
 #include "TouchTracker.h"
 #include "CoordinateFilter.h"
 #include "TouchGestureStateMachine.h"
@@ -32,7 +31,8 @@ ServiceProxy::ServiceProxy()
     m_pipeline.AddProcessor(std::make_unique<Engine::CMFProcessor>());
     m_pipeline.AddProcessor(std::make_unique<Engine::GridIIRProcessor>());
     m_pipeline.AddProcessor(std::make_unique<Engine::FeatureExtractor>());
-    m_pipeline.AddProcessor(std::make_unique<Engine::StylusProcessor>());
+    // NOTE: StylusProcessor removed — stylus is now handled by
+    // independent StylusPipeline in DeviceRuntime.
     m_pipeline.AddProcessor(std::make_unique<Engine::TouchTracker>());
     m_pipeline.AddProcessor(std::make_unique<Engine::CoordinateFilter>());
     m_pipeline.AddProcessor(std::make_unique<Engine::TouchGestureStateMachine>());
@@ -164,6 +164,10 @@ void ServiceProxy::SaveConfig() {
         p->SaveConfig(out);
         out << "\n";
     }
+    // Write stylus pipeline config
+    out << "[StylusPipeline]\n";
+    m_stylusPipeline.SaveConfig(out);
+    out << "\n";
     out.close();
     // Notify Service to reload from config.ini
     m_configDirty.SetDirty();
@@ -186,6 +190,12 @@ void ServiceProxy::LoadConfig() {
                 if (p->GetName() == section) {
                     cur = p.get(); break;
                 }
+            }
+        } else if (section == "StylusPipeline") {
+            auto eq = line.find('=');
+            if (eq != std::string::npos) {
+                m_stylusPipeline.LoadConfig(
+                    line.substr(0, eq), line.substr(eq + 1));
             }
         } else if (cur) {
             auto eq = line.find('=');

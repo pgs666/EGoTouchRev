@@ -147,6 +147,7 @@ struct SharedFrameData {
     uint16_t stylusSignalX = 0, stylusSignalY = 0;
     uint16_t stylusMaxRawPeak = 0;
     bool     stylusNoPressInk = false;
+    uint8_t  stylusPipelineStage = 0;  // 0=ok,1=slaveParse,2=tx1,3=peak,4=coord,5=noise
 
     // Raw suffix data for Master/Slave status tables
     uint8_t  masterSuffix[kMasterSuffixBytes]{};

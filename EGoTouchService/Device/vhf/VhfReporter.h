@@ -23,8 +23,14 @@ public:
     VhfReporter(const VhfReporter&) = delete;
     VhfReporter& operator=(const VhfReporter&) = delete;
 
-    /// 主入口 —— 构建报告并写入 VHF 设备
+    /// 主入口 (legacy, 后向兼容)
     void Dispatch(Engine::HeatmapFrame& frame);
+
+    /// 独立手写笔写入
+    void DispatchStylus(const Engine::StylusPacket& packet);
+
+    /// 独立手指写入 (含 BuildTouchReports)
+    void DispatchTouch(Engine::HeatmapFrame& frame);
 
     // 开关
     void SetEnabled(bool v) { m_enabled.store(v); }

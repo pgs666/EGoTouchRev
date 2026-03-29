@@ -5,6 +5,7 @@
 #include "IFrameProcessor.h"
 #include <fstream>
 #include <string>
+#include <algorithm>
 
 // Engine Pipeline Processors
 #include "MasterFrameParser.h"
@@ -12,14 +13,16 @@
 #include "CMFProcessor.h"
 #include "GridIIRProcessor.h"
 #include "FeatureExtractor.h"
-#include "StylusProcessor.h"
 #include "TouchTracker.h"
 #include "CoordinateFilter.h"
 #include "TouchGestureStateMachine.h"
 
 namespace Service {
 
-// ── 设备路径（与 App/RuntimeOrchestrator 共用同一组） ──
+// ── 固化路径 ──
+static const std::string kConfigPath  = "C:/ProgramData/EGoTouchRev/config.ini";
+
+// ── 设备路径 ──
 static const std::wstring kDevicePathMaster    = L"\\\\.\\Global\\SPBTESTTOOL_MASTER";
 static const std::wstring kDevicePathSlave     = L"\\\\.\\Global\\SPBTESTTOOL_SLAVE";
 static const std::wstring kDevicePathInterrupt = L"\\\\.\\Global\\SPBTESTTOOL_MASTER";
@@ -28,12 +31,49 @@ ServiceHost::~ServiceHost() {
     Stop();
 }
 
+// ── 模式解析 ──────────────────────────────────────────
+ServiceMode ServiceHost::ParseServiceMode(const std::string& configPath) const {
+    std::ifstream cfg(configPath);
+    if (!cfg.is_open()) return ServiceMode::TouchOnly;
+    std::string line;
+    bool inServiceSection = false;
+    while (std::getline(cfg, line)) {
+        if (line.empty() || line[0] == ';') continue;
+        if (line.front() == '[' && line.back() == ']') {
+            inServiceSection = (line == "[Service]");
+            continue;
+        }
+        if (inServiceSection) {
+            auto eq = line.find('=');
+            if (eq != std::string::npos) {
+                std::string key = line.substr(0, eq);
+                std::string val = line.substr(eq + 1);
+                // trim whitespace
+                val.erase(0, val.find_first_not_of(" \t\r\n"));
+                val.erase(val.find_last_not_of(" \t\r\n") + 1);
+                if (key == "mode") {
+                    if (val == "full") return ServiceMode::Full;
+                    return ServiceMode::TouchOnly;
+                }
+            }
+        }
+    }
+    return ServiceMode::TouchOnly;
+}
+
 bool ServiceHost::Start() {
+    // ── 0. 解析运行模式 ──────────────────────────────────
+    m_mode = ParseServiceMode(kConfigPath);
+    LOG_INFO("ServiceHost", "Start", "Boot",
+             "Service mode: {}.",
+             m_mode == ServiceMode::Full ? "full" : "touch_only");
+
     // ── 1. DeviceRuntime（先创建，后续模块依赖它） ─────────
     m_deviceRuntime = std::make_unique<DeviceRuntime>(
         kDevicePathMaster, kDevicePathSlave, kDevicePathInterrupt);
     m_deviceRuntime->SetAutoMode(true);
-    BuildDefaultPipeline();
+    m_deviceRuntime->SetTouchOnlyMode(m_mode == ServiceMode::TouchOnly);
+    BuildDefaultPipeline(kConfigPath);
 
     if (!m_deviceRuntime->Start()) {
         LOG_ERROR("ServiceHost", "Start", "Boot",
@@ -75,6 +115,82 @@ bool ServiceHost::Start() {
 
     LOG_INFO("ServiceHost", "Start", "Boot",
              "All modules started.");
+
+    // ── 4. BT MCU PenBridge（仅 Full 模式启用） ────────
+    if (m_mode == ServiceMode::Full) {
+        m_penBridge = std::make_unique<Himax::Pen::PenBridge>();
+
+        // 事件回调：响应关键 MCU 事件
+        m_penBridge->SetEventCallback(
+            [this](const Himax::Pen::PenEvent& ev) {
+                using EC = Himax::Pen::PenUsbEventCode;
+                switch (ev.code) {
+
+                case EC::PenConnStatus: {
+                    const bool connected = !ev.payload.empty() && ev.payload[0] != 0;
+                    LOG_INFO("ServiceHost", "PenEventCb", "MCU",
+                             "PenConnStatus: {}.",
+                             connected ? "connected" : "disconnected");
+                    if (m_deviceRuntime) {
+                        command cmd{};
+                        if (connected) {
+                            cmd.type  = AFE_Command::InitStylus;
+                            cmd.param = 5;
+                            m_deviceRuntime->SubmitCommand(
+                                cmd, CommandSource::SystemPolicy, "PenConnStatus→Init");
+                        } else {
+                            cmd.type  = AFE_Command::DisconnectStylus;
+                            cmd.param = 0;
+                            m_deviceRuntime->SubmitCommand(
+                                cmd, CommandSource::SystemPolicy, "PenConnStatus→Disconnect");
+                        }
+                    }
+                    break;
+                }
+
+                case EC::PenFreqJump: {
+                    std::string hexDump;
+                    for (size_t i = 0; i < ev.payload.size(); ++i) {
+                        char buf[8];
+                        snprintf(buf, sizeof(buf), "%02X ", ev.payload[i]);
+                        hexDump += buf;
+                    }
+                    LOG_INFO("ServiceHost", "PenEventCb", "MCU",
+                             "PenFreqJump (payload[{}]: {})",
+                             ev.payload.size(), hexDump);
+
+                    if (m_deviceRuntime) {
+                        command cmd{};
+                        cmd.type  = AFE_Command::EnableFreqShift;
+                        cmd.param = 0;
+                        m_deviceRuntime->SubmitCommand(
+                            cmd, CommandSource::SystemPolicy, "PenFreqJump");
+                    }
+                    break;
+                }
+
+                default:
+                    LOG_INFO("ServiceHost", "PenEventCb", "MCU",
+                             "MCU event 0x{:02X} received.",
+                             static_cast<uint8_t>(ev.code));
+                    break;
+                }
+            });
+
+        // 压感回调：BT MCU 压力 → DeviceRuntime → StylusPipeline
+        m_penBridge->SetPressureCallback(
+            [this](uint16_t press) {
+                if (m_deviceRuntime) m_deviceRuntime->SetBtMcuPressure(press);
+            });
+
+        m_penBridge->Start();
+        LOG_INFO("ServiceHost", "Start", "MCU",
+                 "PenBridge started (event + pressure threads).");
+    } else {
+        LOG_INFO("ServiceHost", "Start", "MCU",
+                 "PenBridge skipped (touch_only mode).");
+    }
+
     return true;
 }
 
@@ -86,7 +202,16 @@ void ServiceHost::Stop() {
     m_configDirty.Close();
     m_debugMode = false;
 
+    // PenBridge（先停，避免回调中仍访问 DeviceRuntime）
+    if (m_penBridge) {
+        m_penBridge->Stop();
+        m_penBridge.reset();
+        LOG_INFO("ServiceHost", "Stop", "MCU",
+                 "PenBridge stopped.");
+    }
+
     if (m_sysMonitor) {
+
         m_sysMonitor->Stop();
         m_sysMonitor.reset();
         LOG_INFO("ServiceHost", "Stop", "Monitor",
@@ -105,14 +230,13 @@ void ServiceHost::Stop() {
 }
 
 // ── Pipeline 构建 ──────────────────────────────
-void ServiceHost::BuildDefaultPipeline() {
+void ServiceHost::BuildDefaultPipeline(const std::string& configPath) {
     auto& pl = m_deviceRuntime->GetPipeline();
     pl.AddProcessor(std::make_unique<Engine::MasterFrameParser>());
     pl.AddProcessor(std::make_unique<Engine::BaselineSubtraction>());
     pl.AddProcessor(std::make_unique<Engine::CMFProcessor>());
     pl.AddProcessor(std::make_unique<Engine::GridIIRProcessor>());
     pl.AddProcessor(std::make_unique<Engine::FeatureExtractor>());
-    pl.AddProcessor(std::make_unique<Engine::StylusProcessor>());
     pl.AddProcessor(std::make_unique<Engine::TouchTracker>());
     pl.AddProcessor(std::make_unique<Engine::CoordinateFilter>());
     pl.AddProcessor(std::make_unique<Engine::TouchGestureStateMachine>());
@@ -120,8 +244,8 @@ void ServiceHost::BuildDefaultPipeline() {
              "Registered {} pipeline processors.",
              pl.GetProcessors().size());
 
-    // Load saved config from config.ini
-    std::ifstream cfgIn("config.ini");
+    // Load saved config
+    std::ifstream cfgIn(configPath);
     if (cfgIn.is_open()) {
         std::string line, section;
         Engine::IFrameProcessor* cur = nullptr;
@@ -144,7 +268,10 @@ void ServiceHost::BuildDefaultPipeline() {
             }
         }
         LOG_INFO("ServiceHost", "BuildDefaultPipeline", "Boot",
-                 "Loaded config from config.ini.");
+                 "Loaded config from {}.", configPath);
+    } else {
+        LOG_WARN("ServiceHost", "BuildDefaultPipeline", "Boot",
+                 "Config file not found: {}", configPath);
     }
 }
 
@@ -210,7 +337,7 @@ Ipc::IpcResponse ServiceHost::HandleIpcCommand(
     case Ipc::IpcCommand::ReloadConfig:
         if (m_deviceRuntime) {
             auto& pl = m_deviceRuntime->GetPipeline();
-            std::ifstream in("config.ini");
+            std::ifstream in(kConfigPath);
             if (in.is_open()) {
                 std::string line, section;
                 Engine::IFrameProcessor* cur = nullptr;
@@ -234,7 +361,7 @@ Ipc::IpcResponse ServiceHost::HandleIpcCommand(
                 }
                 resp.success = true;
                 LOG_INFO("ServiceHost", "HandleIpcCommand", "IPC",
-                         "Config reloaded from config.ini.");
+                         "Config reloaded from {}.", kConfigPath);
             }
         }
         break;
@@ -242,8 +369,11 @@ Ipc::IpcResponse ServiceHost::HandleIpcCommand(
     case Ipc::IpcCommand::SaveConfig:
         if (m_deviceRuntime) {
             auto& pl = m_deviceRuntime->GetPipeline();
-            std::ofstream out("config.ini");
+            std::ofstream out(kConfigPath);
             if (out.is_open()) {
+                // Preserve [Service] section
+                out << "[Service]\n";
+                out << "mode=" << (m_mode == ServiceMode::Full ? "full" : "touch_only") << "\n\n";
                 for (auto& p : pl.GetProcessors()) {
                     out << "[" << p->GetName() << "]\n";
                     p->SaveConfig(out);
@@ -251,7 +381,7 @@ Ipc::IpcResponse ServiceHost::HandleIpcCommand(
                 }
                 resp.success = true;
                 LOG_INFO("ServiceHost", "HandleIpcCommand", "IPC",
-                         "Config saved to config.ini.");
+                         "Config saved to {}.", kConfigPath);
             }
         }
         break;
@@ -285,6 +415,27 @@ Ipc::IpcResponse ServiceHost::HandleIpcCommand(
         resp.dataLen = static_cast<uint16_t>(
             std::min(packed.size(), sizeof(resp.data)));
         std::memcpy(resp.data, packed.data(), resp.dataLen);
+        resp.success = true;
+        break;
+    }
+
+    case Ipc::IpcCommand::GetPenBridgeStatus: {
+        // Pack: [running:1][reportType:1][freq1:1][freq2:1][p0L:1][p0H:1][p1L:1][p1H:1][p2L:1][p2H:1][p3L:1][p3H:1]
+        // Total: 12 bytes
+        uint8_t buf[12] = {};
+        if (m_penBridge) {
+            buf[0] = m_penBridge->IsRunning() ? 1 : 0;
+            auto s = m_penBridge->GetPressureStats();
+            buf[1]  = s.reportType;
+            buf[2]  = s.freq1;
+            buf[3]  = s.freq2;
+            for (int k = 0; k < 4; ++k) {
+                buf[4 + k * 2]     = static_cast<uint8_t>(s.press[k] & 0xFF);
+                buf[4 + k * 2 + 1] = static_cast<uint8_t>(s.press[k] >> 8);
+            }
+        }
+        std::memcpy(resp.data, buf, sizeof(buf));
+        resp.dataLen = sizeof(buf);
         resp.success = true;
         break;
     }

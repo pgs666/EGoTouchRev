@@ -67,7 +67,7 @@ target_compile_definitions(Device PUBLIC
 target_include_directories(Device PUBLIC
     "${DEVICE_ROOT}"
 )
-target_link_libraries(Device PUBLIC Common Host Engine)
+target_link_libraries(Device PUBLIC Common Host Engine setupapi hid)
 
 # --- Engine Module (Touch Algorithm) ---
 set(ENGINE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/EGoTouchService/Engine")
@@ -91,7 +91,6 @@ add_library(Engine STATIC
     EGoTouchService/Engine/TouchSolver/CoordinateFilter.cpp
     EGoTouchService/Engine/TouchSolver/FeatureExtractor.cpp
     # Reporting
-    EGoTouchService/Engine/Reporting/StylusProcessor.cpp
     EGoTouchService/Engine/Reporting/TouchTracker.cpp
     EGoTouchService/Engine/Reporting/TouchGestureStateMachine.cpp
     # StylusSolver (official ASA pipeline)
@@ -169,7 +168,7 @@ add_executable(EGoTouchService
 target_include_directories(EGoTouchService PRIVATE
     "${SERVICE_ROOT}/include"
 )
-target_link_libraries(EGoTouchService PRIVATE Device Host Common advapi32 setupapi)
+target_link_libraries(EGoTouchService PRIVATE Device Host Common advapi32 setupapi hid)
 
 # --- BtMcuTestTool (ImGui BT Protocol Validator) ---
 add_executable(BtMcuTestTool

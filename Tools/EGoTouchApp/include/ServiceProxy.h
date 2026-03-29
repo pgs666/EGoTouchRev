@@ -6,6 +6,7 @@
 #include "SharedFrameBuffer.h"
 #include "ConfigSync.h"
 #include "EngineTypes.h"
+#include "IpcProtocol.h"
 #include "FramePipeline.h"
 #include "StylusPipeline.h"
 #include "ConcurrentRingBuffer.h"
@@ -15,6 +16,15 @@
 #include <chrono>
 
 namespace App {
+
+// Lightweight mirror of Service-side PenBridge pressure stats (no PenBridge.h dependency)
+struct PenBridgeStatus {
+    bool     running     = false;
+    uint8_t  reportType  = 0;
+    uint8_t  freq1       = 0;
+    uint8_t  freq2       = 0;
+    uint16_t press[4]    = {0,0,0,0};
+};
 
 class ServiceProxy {
 public:
@@ -69,6 +79,12 @@ public:
     // Local DVR export
     void TriggerDVRExport(bool heatmap, bool master, bool slave);
 
+    // PenBridge status (polled from Service)
+    PenBridgeStatus GetPenBridgeStatus() const {
+        std::lock_guard<std::mutex> lk(m_penMutex);
+        return m_penStatus;
+    }
+
     // Local performance stats
     int  GetAcquisitionFps() const { return m_fps.load(); }
 
@@ -110,6 +126,10 @@ private:
     // MasterParser-only mode
     bool m_masterParserOnly = false;
     std::vector<bool> m_savedProcessorStates;
+
+    // PenBridge status (polled alongside logs)
+    mutable std::mutex m_penMutex;
+    PenBridgeStatus m_penStatus;
 
     // FPS measurement
     std::atomic<int> m_fps{0};

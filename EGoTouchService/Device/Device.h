@@ -20,6 +20,8 @@ enum class AFE_Command : uint8_t {
     ForceExitIdle,         // 强制退出空闲
     ForceToFreqPoint,      // 强制切换到指定频点
     ForceToScanRate,       // 强制切换到指定扫描率
+    InitStylus,            // 手写笔连接初始化（EnableFreqShift + 绑定笔频率对）
+    DisconnectStylus,      // 手写笔断连清理（DisableFreqShift + 重置状态）
 };
 
 enum class THP_AFE_MODE {

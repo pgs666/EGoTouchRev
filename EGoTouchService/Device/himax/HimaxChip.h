@@ -82,6 +82,13 @@ namespace Himax {
             ChipResult<> thp_afe_force_to_freq_point(uint8_t freq_idx);
             ChipResult<> thp_afe_force_to_scan_rate(uint8_t rate_idx);
         public:
+            // ── 手写笔生命周期管理 ────────────────────────────────
+            /// 手写笔连接初始化：EnableFreqShift + 绑定 FreqPair + 设置 connected
+            ChipResult<> InitStylus(uint8_t pen_id = 5);
+            /// 手写笔断连清理：DisableFreqShift + 重置 StylusState
+            ChipResult<> DisconnectStylus();
+            /// 每帧调用：从 master 状态表读取噪声计数，超阈值时切换频点
+            void ProcessStylusStatus();
             alignas(64) std::array<uint8_t, 6000> back_data{};
             THP_INSPECTION_ENUM m_inspection_mode;
             std::atomic<THP_AFE_MODE> afe_mode{THP_AFE_MODE::Normal};

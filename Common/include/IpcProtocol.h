@@ -26,6 +26,8 @@ enum class IpcCommand : uint8_t {
     SaveConfig     = 41,  // Service saves current params to config.ini
     // Logs
     GetLogs        = 50,  // App requests recent log lines from Service
+    // PenBridge (BT MCU)
+    GetPenBridgeStatus = 60,  // App queries live pressure stats + running state
 };
 
 struct IpcRequest {

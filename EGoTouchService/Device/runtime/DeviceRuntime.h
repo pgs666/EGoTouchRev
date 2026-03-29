@@ -81,12 +81,19 @@ public:
     void SetAutoMode(bool enabled) { m_autoMode.store(enabled); }
     bool IsAutoMode() const { return m_autoMode.load(); }
 
+    // Touch-Only 模式（跳过 StylusPipeline / ProcessStylusStatus）
+    void SetTouchOnlyMode(bool v) { m_touchOnly.store(v); }
+    bool IsTouchOnlyMode() const { return m_touchOnly.load(); }
+
     // Pipeline / VHF 配置 — 仅在 Start() 前调用
     Engine::FramePipeline& GetTouchPipeline() { return m_touchPipeline; }
     // Legacy alias
     Engine::FramePipeline& GetPipeline() { return m_touchPipeline; }
     Engine::StylusPipeline& GetStylusPipeline() { return m_stylusPipeline; }
     VhfReporter& GetVhfReporter() { return m_vhfReporter; }
+
+    /// 注入 BT MCU 压感值（由 PenBridge 线程写入，StylusPipeline 帧内读取）
+    void SetBtMcuPressure(uint16_t p) { m_stylusPipeline.SetBtMcuPressure(p); }
 
     // Frame push callback for IPC (called after pipeline+VHF in worker loop)
     using FramePushCallback = std::function<void(const Engine::HeatmapFrame&)>;
@@ -124,11 +131,16 @@ private:
     std::atomic<workerState> m_state{workerState::quit};
     std::atomic<bool> m_stopReq{false};
     std::atomic<bool> m_autoMode{false};
+    std::atomic<bool> m_touchOnly{false};
     Himax::Chip m_chip;
     Engine::FramePipeline m_touchPipeline;
     Engine::StylusPipeline m_stylusPipeline;
     VhfReporter m_vhfReporter;
     uint8_t m_recoverCount = 0;
+
+    // GetFrame 连续非Timeout失败计数（容忍 AFE 命令后的短暂 bus 异常）
+    static constexpr int kMaxConsecutiveFrameErrors = 3;
+    int m_consecutiveFrameErrors = 0;
 
     mutable std::mutex m_mu;
     std::deque<QueuedCommand> m_cmdQueue;

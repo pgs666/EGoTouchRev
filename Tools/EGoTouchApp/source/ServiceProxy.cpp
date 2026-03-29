@@ -330,12 +330,36 @@ void ServiceProxy::PollLoop() {
                 std::istringstream iss(packed);
                 std::string line;
                 while (std::getline(iss, line)) {
-                    if (!line.empty()) {
-                        LOG_INFO("Service", "RemoteLog", "IPC", "{}", line);
-                    }
+                    if (line.empty()) continue;
+                    // Service 日志格式: [timestamp] [level] [layer] [method] [state] msg
+                    // GUI 只保留 [level] 之后的部分，去掉时间戳（首个 ']' 之后）
+                    std::string display = line;
+                    auto bracket = line.find("] ");  // 找时间戳末尾
+                    if (bracket != std::string::npos)
+                        display = line.substr(bracket + 2);  // 跳过 "] "
+                    Common::GuiLogSink::Instance()->PushRaw("[Svc] " + display);
                 }
             }
             lastLogPoll = now;
+        }
+        // PenBridge status polling (~every 500ms for responsive pressure bars)
+        if (logElapsed.count() >= 500 && m_client.IsConnected()) {
+            Ipc::IpcRequest penReq{};
+            penReq.command = Ipc::IpcCommand::GetPenBridgeStatus;
+            auto penResp = m_client.Send(penReq);
+            if (penResp.success && penResp.dataLen >= 12) {
+                const uint8_t* d = penResp.data;
+                PenBridgeStatus s;
+                s.running    = d[0] != 0;
+                s.reportType = d[1];
+                s.freq1      = d[2];
+                s.freq2      = d[3];
+                for (int k = 0; k < 4; ++k)
+                    s.press[k] = static_cast<uint16_t>(d[4 + k * 2]) |
+                                 (static_cast<uint16_t>(d[5 + k * 2]) << 8);
+                std::lock_guard<std::mutex> lk(m_penMutex);
+                m_penStatus = s;
+            }
         }
         if (!gotFrame) {
             std::this_thread::sleep_for(std::chrono::microseconds(100));

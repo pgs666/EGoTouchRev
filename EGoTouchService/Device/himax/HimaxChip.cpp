@@ -65,6 +65,10 @@ const char* AfeCommandToString(AFE_Command cmd) {
         return "ForceToFreqPoint";
     case AFE_Command::ForceToScanRate:
         return "ForceToScanRate";
+    case AFE_Command::InitStylus:
+        return "InitStylus";
+    case AFE_Command::DisconnectStylus:
+        return "DisconnectStylus";
     default:
         return "Unknown";
     }
@@ -798,6 +802,10 @@ ChipResult<> Chip::afe_sendCommand(command cmd) {
         return thp_afe_force_to_freq_point(cmd.param);
     case AFE_Command::ForceToScanRate:
         return thp_afe_force_to_scan_rate(cmd.param);
+    case AFE_Command::InitStylus:
+        return InitStylus(cmd.param);
+    case AFE_Command::DisconnectStylus:
+        return DisconnectStylus();
     default:
         return std::unexpected(ChipError::InvalidOperation);
     }
@@ -933,6 +941,138 @@ bool Chip::isStylusDetected() const {
     const uint8_t b1 = back_data[kSlaveOffset + kHeaderSize];      // 字段 1
     const uint8_t b2 = back_data[kSlaveOffset + kHeaderSize + 1];  // 字段 2
     return !(b1 == 0xFF && b2 == 0xFF);
+}
+
+// ── 手写笔生命周期 ──────────────────────────────────────────────────────────
+
+/// 默认频率命令表（4 条目 + 1 默认笔 ID=5）
+/// 来源：Ghidra 逆向 himax_thp_drv.dll DAT_18016dc80
+/// 每条目：[pen_id, freq0_cmd(u16), freq1_cmd(u16)]
+static constexpr struct { uint8_t id; uint16_t f0; uint16_t f1; } kFreqTable[] = {
+    {0, 0x00A1, 0x0018},   // 笔 0
+    {1, 0x00A2, 0x0019},   // 笔 1
+    {2, 0x00A3, 0x001A},   // 笔 2
+    {3, 0x00A4, 0x001B},   // 笔 3
+    {5, 0x00A1, 0x0018},   // 默认笔 "CD54" (ID=5)
+};
+
+ChipResult<> Chip::InitStylus(uint8_t pen_id) {
+    if (m_connState.load() != ConnectionState::Connected)
+        return std::unexpected(ChipError::InvalidOperation);
+
+    LOG_INFO("Device", "Chip::InitStylus", GetStateStr(),
+             "pen_id={} → EnableFreqShift + bind FreqPair",
+             static_cast<unsigned>(pen_id));
+
+    // 1. 启用芯片频率偏移模式
+    if (auto r = thp_afe_enable_freq_shift(); !r) return r;
+
+    // 2. 按 pen_id 查频率表，绑定 FreqPair
+    StylusFreqPair pair{0x00A1, 0x0018};  // 默认值（ID=5）
+    for (auto& e : kFreqTable) {
+        if (e.id == pen_id) {
+            pair.freq0_cmd = e.f0;
+            pair.freq1_cmd = e.f1;
+            break;
+        }
+    }
+
+    // 3. 更新运行时状态
+    m_stylus.connected       = true;
+    m_stylus.pen_id          = pen_id;
+    m_stylus.freqPair        = pair;
+    m_stylus.freqIdx         = 0;       // 初始频点 0
+    m_stylus.switchPolicy    = 2;       // 启用噪声触发切换
+    m_stylus.switchTargetIdx = 0;
+    m_stylus.switchReqPending = false;
+
+    LOG_INFO("Device", "Chip::InitStylus", GetStateStr(),
+             "Stylus ready: freq0=0x{:04X}, freq1=0x{:04X}, policy=2",
+             pair.freq0_cmd, pair.freq1_cmd);
+
+    return {};
+}
+
+ChipResult<> Chip::DisconnectStylus() {
+    if (m_connState.load() != ConnectionState::Connected)
+        return std::unexpected(ChipError::InvalidOperation);
+
+    LOG_INFO("Device", "Chip::DisconnectStylus", GetStateStr(),
+             "DisableFreqShift + reset StylusState");
+
+    // 禁用频率偏移
+    (void)thp_afe_disable_freq_shift();
+
+    // 重置手写笔状态
+    m_stylus = StylusState{};
+
+    return {};
+}
+
+/// 每帧调用：从 master 状态表读取 F0/F1 噪声计数，
+/// 噪声差 > 5000 时发 ForceToFreqPoint 切换扫描频率。
+/// 与原厂 thp_afe_process_stylus_status() 等价。
+void Chip::ProcessStylusStatus() {
+    if (!m_stylus.connected || m_stylus.switchPolicy < 2) return;
+
+    // ── 定位 master 帧内的状态表 ────────────────────────────────
+    // Master 帧布局: [7 协议头][4800 电容数据][256 状态表]
+    // 状态表起始偏移 = 7 + 4800 = 4807
+    constexpr size_t kMasterStatusOffset = 4807;
+    // F0 噪声计数位于状态表 +0x1C（u16）
+    constexpr size_t kF0NoiseOffset = kMasterStatusOffset + 0x1C;
+    // F1 噪声计数位于状态表 +0x20（u16）
+    constexpr size_t kF1NoiseOffset = kMasterStatusOffset + 0x20;
+    // 频率切换完成标志位于状态表 +0x04（u16）
+    constexpr size_t kFreqShiftDoneOffset = kMasterStatusOffset + 0x04;
+
+    // 安全检查
+    if (kF1NoiseOffset + 2 > back_data.size()) return;
+
+    // 读取噪声值（小端 u16）
+    auto readU16 = [this](size_t off) -> uint16_t {
+        return static_cast<uint16_t>(back_data[off]) |
+               (static_cast<uint16_t>(back_data[off + 1]) << 8);
+    };
+
+    uint16_t f0_noise = readU16(kF0NoiseOffset);
+    uint16_t f1_noise = readU16(kF1NoiseOffset);
+    uint16_t freqDone = readU16(kFreqShiftDoneOffset);
+
+    // ── 频率切换完成确认 ────────────────────────────────────────
+    if (freqDone != 0 && m_stylus.switchReqPending) {
+        m_stylus.freqIdx = m_stylus.switchTargetIdx;
+        m_stylus.switchReqPending = false;
+        LOG_INFO("Device", "Chip::ProcessStylusStatus", GetStateStr(),
+                 "FreqShift done → now at freqIdx={}", m_stylus.freqIdx);
+    }
+
+    // ── 噪声差判断 → 频率切换请求 ───────────────────────────────
+    // 阈值 5000，与原厂固件一致
+    constexpr int kNoiseThreshold = 5000;
+
+    if (!m_stylus.switchReqPending) {
+        int diff_01 = static_cast<int>(f0_noise) - static_cast<int>(f1_noise);
+        int diff_10 = static_cast<int>(f1_noise) - static_cast<int>(f0_noise);
+
+        if (diff_01 >= kNoiseThreshold && m_stylus.freqIdx != 1) {
+            // F0 太吵 → 切到频点1
+            m_stylus.switchTargetIdx = 1;
+            m_stylus.switchReqPending = true;
+            LOG_INFO("Device", "Chip::ProcessStylusStatus", GetStateStr(),
+                     "F0_noise({})−F1_noise({})={} ≥{} → ForceToFreqPoint(1)",
+                     f0_noise, f1_noise, diff_01, kNoiseThreshold);
+            (void)thp_afe_force_to_freq_point(1);
+        } else if (diff_10 > kNoiseThreshold && m_stylus.freqIdx != 0) {
+            // F1 太吵 → 切回频点0
+            m_stylus.switchTargetIdx = 0;
+            m_stylus.switchReqPending = true;
+            LOG_INFO("Device", "Chip::ProcessStylusStatus", GetStateStr(),
+                     "F1_noise({})−F0_noise({})={} >{} → ForceToFreqPoint(0)",
+                     f1_noise, f0_noise, diff_10, kNoiseThreshold);
+            (void)thp_afe_force_to_freq_point(0);
+        }
+    }
 }
 
 ChipResult<> Chip::GetFrame(void) {

@@ -44,14 +44,10 @@ void DrawProcessorConfigBlock(Engine::IFrameProcessor* processor, int idBase) {
 } // namespace
 
 DiagnosticsWorkbench::DiagnosticsWorkbench(ServiceProxy* proxy) : m_proxy(proxy) {
-    m_btTransport = Himax::Pen::CreatePenUsbTransportWin32();
 }
 
 DiagnosticsWorkbench::~DiagnosticsWorkbench() {
-    // Stop BT MCU read thread
-    m_btKeepReading = false;
-    if (m_btReadThread.joinable()) m_btReadThread.join();
-    if (m_btTransport) m_btTransport->Close();
+    // PenBridge is externally owned — no cleanup needed here
 }
 
 // ... rest of the content up to DrawHeatmap
@@ -1338,174 +1334,76 @@ void DiagnosticsWorkbench::ExportCurrentFrameToCSV(bool isAutoCapture) {
     LOG_INFO("App", "DiagnosticsWorkbench::ExportCurrentFrameToCSV", "UI", "Frame exported to {}", fullPath.string());
 }
 
-// ── BT MCU Panel ──
-
-static const GUID kPenMcuGuid = {0xdd0ebedb, 0xf1d6, 0x4cfa, {0xac, 0xca, 0x71, 0xe6, 0x6d, 0x31, 0x78, 0xca}};
-
-static std::optional<std::wstring> FindPenMcuDevicePath() {
-    HDEVINFO devInfo = SetupDiGetClassDevsW(&kPenMcuGuid, nullptr, nullptr,
-                                            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (devInfo == INVALID_HANDLE_VALUE) return std::nullopt;
-
-    std::optional<std::wstring> result;
-    SP_DEVICE_INTERFACE_DATA ifData{};
-    ifData.cbSize = sizeof(ifData);
-    if (SetupDiEnumDeviceInterfaces(devInfo, nullptr, &kPenMcuGuid, 0, &ifData)) {
-        DWORD reqSz = 0;
-        SetupDiGetDeviceInterfaceDetailW(devInfo, &ifData, nullptr, 0, &reqSz, nullptr);
-        std::vector<uint8_t> buf(reqSz, 0);
-        auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buf.data());
-        detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
-        if (SetupDiGetDeviceInterfaceDetailW(devInfo, &ifData, detail, reqSz, nullptr, nullptr)) {
-            result = detail->DevicePath;
-        }
-    }
-    SetupDiDestroyDeviceInfoList(devInfo);
-    return result;
-}
-
-void DiagnosticsWorkbench::BtMcuAddLog(const std::string& dir, const std::vector<uint8_t>& data) {
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
-    struct tm parts;
-    localtime_s(&parts, &now_c);
-    char ts[64];
-    strftime(ts, sizeof(ts), "%H:%M:%S", &parts);
-
-    std::lock_guard<std::mutex> lk(m_btLogMutex);
-    m_btLogs.push_back({ts, dir, data});
-    if (m_btLogs.size() > 500) m_btLogs.pop_front();
-}
-
-void DiagnosticsWorkbench::BtMcuSendPacket(uint16_t cmdId, const std::vector<uint8_t>& payload) {
-    if (!m_btTransport || !m_btTransport->IsOpen()) return;
-
-    std::vector<uint8_t> tx(8 + payload.size(), 0);
-    tx[0] = 0x07; tx[1] = 0x01; tx[2] = 0x02; tx[3] = 0x00;
-    tx[4] = cmdId & 0xFF; tx[5] = (cmdId >> 8) & 0xFF;
-    tx[6] = 0x11; tx[7] = 0x00;
-    if (cmdId == 0x7101) tx[1] = 0x00;
-    if (cmdId == 0x7701) tx[1] = 0x00;
-    if (cmdId == 0x8001) { tx[1] = 0x01; tx[7] = 0x20; }
-    std::copy(payload.begin(), payload.end(), tx.begin() + 8);
-
-    auto res = m_btTransport->WritePacket(tx);
-    BtMcuAddLog(res.has_value() ? "Tx" : "Tx [ERR]", tx);
-}
+// ── BT MCU Panel (PenBridge Status — via IPC) ──
 
 void DiagnosticsWorkbench::DrawBtMcuPanel() {
-    // Connection
-    ImGui::Text("Connection: "); ImGui::SameLine();
-    if (m_btTransport && m_btTransport->IsOpen()) {
-        ImGui::TextColored(ImVec4(0,1,0,1), "CONNECTED");
-    } else {
-        ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "DISCONNECTED");
+    ImGui::TextWrapped(
+        "BT MCU dual-channel bridge (PenBridge) runs inside EGoTouchService. "
+        "Event channel: auto-ACK + 0x7D01 echo. "
+        "Pressure channel: continuous 'U' report decode.");
+    ImGui::Separator();
+
+    // ── Status + Pressure (via IPC GetPenBridgeStatus) ──
+    auto ps = m_proxy ? m_proxy->GetPenBridgeStatus() : App::PenBridgeStatus{};
+
+    ImGui::Text("PenBridge:");
+    ImGui::SameLine();
+    if (ps.running)
+        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "RUNNING");
+    else
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "STOPPED");
+
+    ImGui::Separator();
+    ImGui::Text("Live Pressure Data");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(polled every ~500ms)");
+
+    ImGui::Text("Report: 0x%02X (%c)  |  BT Freq: %d / %d",
+                ps.reportType,
+                ps.reportType >= 0x20 ? static_cast<char>(ps.reportType) : '?',
+                ps.freq1, ps.freq2);
+
+    for (int k = 0; k < 4; ++k) {
+        ImGui::PushID(k);
+        char overlay[32];
+        snprintf(overlay, sizeof(overlay), "P%d: %u", k, ps.press[k]);
+        ImGui::ProgressBar(static_cast<float>(ps.press[k]) / 8192.0f,
+                           ImVec2(-1, 18), overlay);
+        ImGui::PopID();
     }
 
-    if (ImGui::Button("Connect (Auto)")) {
-        auto pathOpt = FindPenMcuDevicePath();
-        if (pathOpt.has_value() && m_btTransport) {
-            auto res = m_btTransport->Open(pathOpt.value());
-            if (res.has_value()) {
-                LOG_INFO("BtMcu", "Connect", "UI", "Connected to MCU device.");
-                // Start read thread
-                if (!m_btKeepReading) {
-                    m_btKeepReading = true;
-                    m_btReadThread = std::thread([this] {
-                        while (m_btKeepReading) {
-                            if (!m_btTransport || !m_btTransport->IsOpen()) {
-                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                                continue;
-                            }
-                            std::vector<uint8_t> rxBuf;
-                            auto r = m_btTransport->ReadPacket(rxBuf, 1000);
-                            if (r.has_value() && !rxBuf.empty()) {
-                                BtMcuAddLog("Rx", rxBuf);
-                            }
-                        }
-                    });
-                }
-            } else {
-                LOG_ERROR("BtMcu", "Connect", "UI", "Failed to open MCU device.");
-            }
-        } else {
-            LOG_ERROR("BtMcu", "Connect", "UI", "MCU device not found.");
+    // ── MCU 相关日志 ──
+    ImGui::Separator();
+    ImGui::Text("MCU-related Service Logs");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(refreshed every ~1s via IPC)");
+
+    auto allLines = Common::GuiLogSink::Instance()->GetLines();
+    ImGui::BeginChild("McuLogFilter", ImVec2(0, 0), true,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    for (const auto& line : allLines) {
+        if (line.find("PenBridge") != std::string::npos ||
+            line.find("MCU") != std::string::npos ||
+            line.find("PenEventCb") != std::string::npos ||
+            line.find("PenConn") != std::string::npos ||
+            line.find("PenFreq") != std::string::npos) {
+            ImVec4 col(0.4f, 0.8f, 1.0f, 1.0f);
+            if (line.find("ACK") != std::string::npos ||
+                line.find("7D01") != std::string::npos)
+                col = ImVec4(0.3f, 1.0f, 0.5f, 1.0f);
+            if (line.find("[error") != std::string::npos ||
+                line.find("failed") != std::string::npos)
+                col = ImVec4(1.0f, 0.4f, 0.4f, 1.0f);
+            if (line.find("[warn") != std::string::npos)
+                col = ImVec4(1.0f, 0.85f, 0.3f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, col);
+            ImGui::TextUnformatted(line.c_str());
+            ImGui::PopStyleColor();
         }
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Close##btmcu")) {
-        m_btKeepReading = false;
-        if (m_btReadThread.joinable()) m_btReadThread.join();
-        if (m_btTransport) m_btTransport->Close();
-    }
-
-    ImGui::Separator();
-    ImGui::Text("Quick Commands");
-    if (ImGui::Button("Status (0x7101)")) BtMcuSendPacket(0x7101, {});
-    ImGui::SameLine();
-    if (ImGui::Button("Info (0x7701)")) BtMcuSendPacket(0x7701, {});
-    ImGui::SameLine();
-    if (ImGui::Button("Init (0x7D01)")) BtMcuSendPacket(0x7D01, {0x20});
-    ImGui::SameLine();
-    if (ImGui::Button("Match (0x7E01)")) BtMcuSendPacket(0x7E01, {0x01});
-
-    ImGui::Separator();
-    ImGui::Text("Custom Command");
-    ImGui::InputText("Cmd ID (Hex)", m_btCmdBuf, sizeof(m_btCmdBuf),
-                     ImGuiInputTextFlags_CharsHexadecimal);
-    ImGui::InputText("Payload (Hex)", m_btPayloadBuf, sizeof(m_btPayloadBuf));
-    if (ImGui::Button("Send Custom")) {
-        uint32_t cmdId = 0;
-        sscanf_s(m_btCmdBuf, "%x", &cmdId);
-        std::vector<uint8_t> payload;
-        char* next = nullptr;
-        char* tok = strtok_s(m_btPayloadBuf, " ", &next);
-        while (tok) {
-            uint32_t v = 0;
-            if (sscanf_s(tok, "%x", &v) == 1) payload.push_back(static_cast<uint8_t>(v));
-            tok = strtok_s(nullptr, " ", &next);
-        }
-        BtMcuSendPacket(static_cast<uint16_t>(cmdId), payload);
-    }
-
-    ImGui::Separator();
-    ImGui::Text("ACK (0x8001)");
-    ImGui::InputText("ACK Code", m_btAckBuf, sizeof(m_btAckBuf),
-                     ImGuiInputTextFlags_CharsHexadecimal);
-    ImGui::SameLine();
-    if (ImGui::Button("Send ACK")) {
-        uint32_t ackVal = 0;
-        sscanf_s(m_btAckBuf, "%x", &ackVal);
-        BtMcuSendPacket(0x8001, {static_cast<uint8_t>(ackVal)});
-    }
-
-    ImGui::Separator();
-    // Hex Dump Log
-    {
-        std::lock_guard<std::mutex> lk(m_btLogMutex);
-        ImGui::Text("Packet Log (%zu)", m_btLogs.size());
-        ImGui::SameLine();
-        if (ImGui::Button("Clear##btlog")) m_btLogs.clear();
-
-        ImGui::BeginChild("BtMcuLog", ImVec2(0, 0), true,
-                          ImGuiWindowFlags_HorizontalScrollbar);
-        for (const auto& log : m_btLogs) {
-            ImGui::Text("[%s] %s: ", log.time.c_str(), log.direction.c_str());
-            ImGui::SameLine();
-            for (size_t i = 0; i < log.data.size(); ++i) {
-                if (i == 4 || i == 5)
-                    ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f), "%02X", log.data[i]);
-                else if (i == 6)
-                    ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f), "%02X", log.data[i]);
-                else
-                    ImGui::Text("%02X", log.data[i]);
-                if (i < log.data.size() - 1) ImGui::SameLine();
-            }
-        }
-        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
-            ImGui::SetScrollHereY(1.0f);
-        ImGui::EndChild();
-    }
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+        ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
 }
 
 // ── System Events Panel ──

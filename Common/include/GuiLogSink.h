@@ -32,6 +32,18 @@ public:
         return result;
     }
 
+    // Directly insert a pre-formatted string (e.g. forwarded Service logs)
+    // without running it through the spdlog formatter.
+    void PushRaw(const std::string& line) {
+        std::lock_guard<std::mutex> lk(mutex_);
+        lines_.push_back(line);
+        pendingLines_.push_back(line);
+        while (static_cast<int>(lines_.size()) > kMaxLines)
+            lines_.pop_front();
+        while (static_cast<int>(pendingLines_.size()) > kMaxLines)
+            pendingLines_.pop_front();
+    }
+
     void Clear() {
         std::lock_guard<std::mutex> lk(mutex_);
         lines_.clear();

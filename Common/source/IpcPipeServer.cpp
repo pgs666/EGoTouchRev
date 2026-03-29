@@ -29,6 +29,16 @@ void IpcPipeServer::Stop() {
 }
 
 void IpcPipeServer::ServerLoop() {
+    // Build permissive security descriptor for cross-session access
+    // (Service runs as SYSTEM, App runs as user)
+    SECURITY_DESCRIPTOR sd{};
+    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE);  // NULL DACL = full access
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = &sd;
+    sa.bInheritHandle = FALSE;
+
     while (m_running.load()) {
         // Create pipe instance
         HANDLE pipe = CreateNamedPipeW(
@@ -36,7 +46,7 @@ void IpcPipeServer::ServerLoop() {
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
             1, sizeof(IpcResponse), sizeof(IpcRequest),
-            0, nullptr);
+            0, &sa);
         if (pipe == INVALID_HANDLE_VALUE) {
             LOG_ERROR("Ipc", "IpcPipeServer::ServerLoop", "IPC",
                       "CreateNamedPipe failed: {}", GetLastError());

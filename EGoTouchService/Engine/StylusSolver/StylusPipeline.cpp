@@ -123,6 +123,13 @@ StylusPipeline::MasterMeta StylusPipeline::ExtractMasterMeta(
     mm.button = read32(baseWord+12);
     mm.status = read32(baseWord+14);
     m_masterMetaDetectedBaseWord = mm.baseWord;
+
+    // Fixed-offset signal fields (independent of auto-detect)
+    if (kSuffixPressureWord < kMasterSuffixWords)
+        mm.penSignalPressure = words[kSuffixPressureWord];
+    if (kSuffixTiltWord < kMasterSuffixWords)
+        mm.penSignalTilt = words[kSuffixTiltWord];
+
     return mm;
 }
 
@@ -166,36 +173,44 @@ bool StylusPipeline::Process(
     m_gridData = Asa::ExtractGridFromSlaveWords(
         sw.data(), static_cast<int>(sw.size()));
 
-    // 3. Master metadata and slave header metadata
+    // 3. Metadata extraction: slave header + master suffix fallback
     auto meta = ExtractMasterMeta(rawData);
     if (meta.valid) m_lastResult.status = meta.status;
 
-    // Also extract pressure/button from slave header (bytes 0-6)
-    // Slave header: [status:2][freq:2][pressure:2][button:1]
+    // Cache slave header bytes and extract pressure/button
     if (rawData.size() >= kMasterFrameBytes + 7) {
         const uint8_t* sHdr = rawData.data() + kMasterFrameBytes;
-        uint16_t slavePressure = ReadU16Le(sHdr + 4);
-        uint8_t slaveButton = sHdr[6];
-        // Use slave header values if they look valid
-        if (slavePressure <= 0x0FFF) {
-            meta.pressure = slavePressure;
-            meta.valid = true;
+        std::memcpy(m_rawSlaveHdr, sHdr, 7);
+
+        if (m_useSlaveHdrForMeta) {
+            // Pressure: uint16 LE at configurable offset
+            if (m_slaveHdrPressOffset >= 0 && m_slaveHdrPressOffset <= 5) {
+                uint16_t sp = ReadU16Le(sHdr + m_slaveHdrPressOffset);
+                meta.pressure = sp;
+                meta.valid = true;
+            }
+            // Button: uint8 at configurable offset
+            if (m_slaveHdrBtnOffset >= 0 && m_slaveHdrBtnOffset <= 6) {
+                meta.button = sHdr[m_slaveHdrBtnOffset];
+                meta.valid = true;
+            }
+            // Status from slave header if not found
+            if (meta.status == 0) {
+                meta.status = ReadU16Le(sHdr);
+                meta.valid = true;
+            }
         }
-        meta.button = slaveButton;
-        // Status from slave header if master meta didn't find it
-        if (!meta.valid || meta.status == 0) {
-            uint16_t slaveStatus = ReadU16Le(sHdr);
-            meta.status = slaveStatus;
-            meta.valid = true;
-        }
-        // Log slave header for debugging
+
+        // Throttled log
         static int sSlvHdrLog = 0;
         if ((sSlvHdrLog++ % 120) == 0) {
             LOG_INFO("StylusPipeline", "Process", "SlaveHdr",
-                     "hdr=[{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}] press={} btn={}",
+                     "hdr=[{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}] "
+                     "press(off{})={} btn(off{})={}",
                      sHdr[0], sHdr[1], sHdr[2], sHdr[3],
                      sHdr[4], sHdr[5], sHdr[6],
-                     slavePressure, slaveButton);
+                     m_slaveHdrPressOffset, meta.pressure,
+                     m_slaveHdrBtnOffset, meta.button);
         }
     }
 
@@ -275,21 +290,23 @@ bool StylusPipeline::Process(
 
     m_lastResult.point.valid = finalCoor.valid;
     // Grid coordinate is local to the 9×9 window (0 ~ 9*1024).
-    // Anchor = CENTER of the 9×9 grid on the full sensor.
-    // When peak is at grid index 4 (center), gridLocal ≈ 4*1024.
-    // Full-sensor coord = (anchor - gridCenter) * kCoorUnit + gridLocal
-    //                   = anchor * kCoorUnit + (gridLocal - gridCenter * kCoorUnit)
-    constexpr int kGridCenter = Asa::kGridDim / 2;  // = 4
+    // m_anchorCenterOffset controls grid center interpretation:
+    //   0 = anchor is top-left of grid (no subtraction)
+    //   4 = anchor is center of grid (subtract 4*1024)
     const float anchorX = static_cast<float>(
         m_gridData.tx1.anchorRow) * Asa::kCoorUnit;
     const float anchorY = static_cast<float>(
         m_gridData.tx1.anchorCol) * Asa::kCoorUnit;
-    constexpr float kCenterOffset =
-        static_cast<float>(kGridCenter) * Asa::kCoorUnit;
+    const float centerOff =
+        static_cast<float>(m_anchorCenterOffset) * Asa::kCoorUnit;
     m_lastResult.point.x = anchorX +
-        static_cast<float>(finalCoor.dim1) - kCenterOffset;
+        static_cast<float>(finalCoor.dim1) - centerOff;
     m_lastResult.point.y = anchorY +
-        static_cast<float>(finalCoor.dim2) - kCenterOffset;
+        static_cast<float>(finalCoor.dim2) - centerOff;
+
+    // 10b. Edge coordinate compensation
+    if (m_edgeCoorPostEnabled)
+        EdgeCoorPostProcess(m_lastResult.point.x, m_lastResult.point.y);
 
     // 11. TX2 for tilt
     if (m_tiltEnabled && m_gridData.tx2.valid) {
@@ -302,17 +319,44 @@ bool StylusPipeline::Process(
         }
     }
 
-    // 12. Pressure
+    // 12. Pressure — use configurable source
     if (meta.valid) {
-        // Throttled diagnostic for pressure/button
+        // Cache signal values for diagnostics
+        m_lastSuffixPressure = meta.penSignalPressure;
+        m_lastSuffixTilt     = meta.penSignalTilt;
+
+        // Select pressure input based on configured source
+        uint16_t pressureInput = 0;
+        switch (m_pressureSource) {
+        case PressureSource::MasterSuffix102:
+            pressureInput = meta.penSignalPressure;
+            break;
+        case PressureSource::SlaveHeader:
+            pressureInput = meta.pressure; // from slave hdr or auto-detect
+            break;
+        case PressureSource::AutoDetectStruct:
+            pressureInput = meta.pressure; // from words[base+10]
+            break;
+        }
+
+        // Merge with BT MCU pressure (PenBridge)
+        uint16_t btPress = m_btMcuPressure.load(std::memory_order_relaxed);
+        if (btPress > pressureInput)
+            pressureInput = btPress;
+
+        // Throttled diagnostic
         static int sPressLogCount = 0;
         if ((sPressLogCount++ % 120) == 0) {
             LOG_INFO("StylusPipeline", "Process", "Meta",
-                     "base={} press={} btn={} status=0x{:X} freq=({},{})",
-                     meta.baseWord, meta.pressure, meta.button,
-                     meta.status, meta.tx1Freq, meta.tx2Freq);
+                     "base={} pressIn={} suffix102={} suffix103={} "
+                     "btMcu={} btn={} status=0x{:X} freq=({},{})",
+                     meta.baseWord, pressureInput,
+                     meta.penSignalPressure, meta.penSignalTilt,
+                     btPress,
+                     meta.button, meta.status,
+                     meta.tx1Freq, meta.tx2Freq);
         }
-        SolvePressure(meta.pressure, finalCoor.valid);
+        SolvePressure(pressureInput, finalCoor.valid);
     }
 
     // 13. Button
@@ -500,6 +544,41 @@ uint32_t StylusPipeline::UpdateButtonState(
 }
 
 // ══════════════════════════════════════════════
+// EdgeCoorPostProcess (ported from TSACore)
+// Compensates for edge signal attenuation on
+// the first and last sensor cell in each axis.
+// ══════════════════════════════════════════════
+void StylusPipeline::EdgeCoorPostProcess(
+        float& dim1, float& dim2) const {
+    // Helper: process one dimension
+    auto edgeClamp = [](float coord, int sensorDim) -> float {
+        constexpr float deadZone   = static_cast<float>(kEdgeDeadZone);
+        constexpr float cellUnit   = static_cast<float>(kCellUnit);
+        constexpr float activeZone = static_cast<float>(kEdgeActiveZone);
+        const float maxCoord = static_cast<float>(sensorDim) * cellUnit;
+
+        // First cell: coord in [0, cellUnit)
+        if (coord < cellUnit) {
+            if (coord < deadZone)
+                return 0.0f;               // dead zone → clamp to 0
+            return (coord - deadZone) * cellUnit / activeZone;
+        }
+        // Last cell: coord in [(sensorDim-1)*cellUnit, sensorDim*cellUnit]
+        const float lastCellStart = static_cast<float>(sensorDim - 1) * cellUnit;
+        if (coord > lastCellStart) {
+            float distFromEnd = maxCoord - coord;
+            if (distFromEnd < deadZone)
+                return maxCoord;            // dead zone → clamp to max
+            return maxCoord - (distFromEnd - deadZone) * cellUnit / activeZone;
+        }
+        return coord;  // interior cells: no change
+    };
+
+    dim1 = edgeClamp(dim1, m_sensorDimX);
+    dim2 = edgeClamp(dim2, m_sensorDimY);
+}
+
+// ══════════════════════════════════════════════
 // Recheck
 // ══════════════════════════════════════════════
 bool StylusPipeline::EvaluateRecheck() const {
@@ -665,16 +744,66 @@ void StylusPipeline::DrawConfigUI() {
             &m_emitPacketWhenInvalid);
         ImGui::SliderInt("Button Release Hold",
             &m_buttonReleaseHoldFrames, 0, 10);
-        ImGui::Separator();
-        ImGui::Text("Sensor Array Dimensions:");
+    }
+
+    // ── Coordinate Mapping ──
+    if (ImGui::CollapsingHeader("Coordinate Mapping",
+            ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::SliderInt("Sensor Dim X (rows)",
             &m_sensorDimX, 9, 80);
         ImGui::SliderInt("Sensor Dim Y (cols)",
             &m_sensorDimY, 9, 80);
+        ImGui::SliderInt("Anchor Center Offset",
+            &m_anchorCenterOffset, 0, 8);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(0=start, 4=center)");
+        ImGui::Separator();
         ImGui::Text("Anchor: (%d, %d)",
             m_gridData.tx1.anchorRow, m_gridData.tx1.anchorCol);
-        ImGui::Text("Full coord: (%.0f, %.0f)",
+        ImGui::Text("Full coord: (%.1f, %.1f)",
             m_lastResult.point.x, m_lastResult.point.y);
+        const float rx = static_cast<float>(m_sensorDimX) *
+            Asa::kCoorUnit;
+        const float ry = static_cast<float>(m_sensorDimY) *
+            Asa::kCoorUnit;
+        if (rx > 0 && ry > 0) {
+            ImGui::Text("Report: (%.0f, %.0f) / 16000",
+                std::clamp((1.f - m_lastResult.point.x / rx) *
+                    16000.f, 0.f, 16000.f),
+                std::clamp(m_lastResult.point.y / ry *
+                    16000.f, 0.f, 16000.f));
+        }
+        ImGui::Text("Pressure: %d  Button: %d",
+            m_lastResult.pressure, m_lastResult.button);
+        ImGui::Text("Pipeline Stage: %d",
+            m_lastResult.pipelineStage);
+    }
+
+    // ── Slave Header ──
+    if (ImGui::CollapsingHeader("Slave Header",
+            ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Raw: %02X %02X %02X %02X %02X %02X %02X",
+            m_rawSlaveHdr[0], m_rawSlaveHdr[1],
+            m_rawSlaveHdr[2], m_rawSlaveHdr[3],
+            m_rawSlaveHdr[4], m_rawSlaveHdr[5],
+            m_rawSlaveHdr[6]);
+        // Show interpretation of each byte pair
+        for (int i = 0; i < 6; ++i) {
+            uint16_t val = static_cast<uint16_t>(
+                m_rawSlaveHdr[i]) |
+                (static_cast<uint16_t>(m_rawSlaveHdr[i+1]) << 8);
+            ImGui::Text("  off[%d..%d] u16LE=%5d (0x%04X) u8=%3d",
+                i, i+1, val, val, m_rawSlaveHdr[i]);
+        }
+        ImGui::Text("  off[6] u8=%3d (0x%02X)",
+            m_rawSlaveHdr[6], m_rawSlaveHdr[6]);
+        ImGui::Separator();
+        ImGui::Checkbox("Use Slave Header for Meta",
+            &m_useSlaveHdrForMeta);
+        ImGui::SliderInt("Press Byte Offset",
+            &m_slaveHdrPressOffset, 0, 5);
+        ImGui::SliderInt("Button Byte Offset",
+            &m_slaveHdrBtnOffset, 0, 6);
     }
 
     // ── Master Meta ──
@@ -695,6 +824,33 @@ void StylusPipeline::DrawConfigUI() {
             m_freqA = static_cast<uint16_t>(std::clamp(fA, 0, 0xFFFF));
         if (ImGui::InputInt("Freq B (hex)", &fB))
             m_freqB = static_cast<uint16_t>(std::clamp(fB, 0, 0xFFFF));
+        ImGui::Separator();
+        // Signal fields from fixed suffix offsets
+        ImGui::TextColored(ImVec4(0.2f,0.9f,0.4f,1),
+            "Suffix[102] Pressure Signal: %d (0x%04X)",
+            m_lastSuffixPressure, m_lastSuffixPressure);
+        ImGui::TextColored(ImVec4(0.4f,0.7f,1.0f,1),
+            "Suffix[103] Tilt Signal:     %d (0x%04X)",
+            m_lastSuffixTilt, m_lastSuffixTilt);
+        ImGui::Separator();
+        // Pressure source selector
+        const char* srcNames[] = {
+            "Master Suffix [102]", "Slave Header", "Auto-Detect Struct" };
+        int srcIdx = static_cast<int>(m_pressureSource);
+        if (ImGui::Combo("Pressure Source", &srcIdx,
+                srcNames, IM_ARRAYSIZE(srcNames)))
+            m_pressureSource = static_cast<PressureSource>(srcIdx);
+        ImGui::Checkbox("Use Suffix[103] for Tilt",
+            &m_useSuffixTilt);
+    }
+
+    // ── Edge Coordinate ──
+    if (ImGui::CollapsingHeader("Edge Coordinate Post")) {
+        ImGui::Checkbox("Enable Edge Compensation",
+            &m_edgeCoorPostEnabled);
+        ImGui::Text("Dead Zone: %d/%d of first/last cell (%.1f%%)",
+            kEdgeDeadZone, kCellUnit,
+            100.0f * kEdgeDeadZone / kCellUnit);
     }
 
     // ── Tilt ──

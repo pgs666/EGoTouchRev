@@ -4,395 +4,348 @@
 
 ## 1. 总体架构
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     原始帧数据 (Master + Slave)                      │
-│                  rawData: ~5402 bytes total                         │
-└──────┬──────────────────────────────────┬───────────────────────────┘
-       │ Master Frame (5063 bytes)        │ Slave Frame (339 bytes)
-       │ 触控mutual capacitance          │ 手写笔grid数据
-       │ (本管线不使用)                    │
-       ▼                                  ▼
-┌──────────────┐                ┌──────────────────────────┐
-│ Master Suffix │                │  Slave Header (7 bytes)  │
-│ (128 words)   │                │  + Grid Payload (332)    │
-│ 备用meta源     │                │  主要数据源               │
-└──────────────┘                └──────────┬───────────────┘
-                                           │
-                    ┌──────────────────────┐│┌──────────────────┐
-                    │ 1. ParseSlaveWords   │││ 2. ExtractMeta   │
-                    │    校验+解析166 words ││  press/btn/status│
-                    └──────────┬───────────┘│└──────────────────┘
-                               │            │
-                    ┌──────────▼───────────┐│
-                    │ 3. ExtractGridFrom   ││
-                    │    SlaveWords         ││
-                    │    → TX1/TX2 9×9 grid ││
-                    │    → anchor (row,col) ││
-                    └──────────┬───────────┘│
-                               │            │
-                    ┌──────────▼───────────┐│
-                    │ 4. FindPeak           ││
-                    │    flood-fill peak    ││
-                    │    detection on 9×9   ││
-                    └──────────┬───────────┘│
-                               │            │
-                    ┌──────────▼───────────┐│
-                    │ 5. ProjectTo1D       ││
-                    │    行列求和投影       ││
-                    └──────────┬───────────┘│
-                               │            │
-                    ┌──────────▼───────────┐│
-                    │ 6. CoordinateSolver  ││
-                    │    三角插值/重心法    ││
-                    └──────────┬───────────┘│
-                               │            │
-                    ┌──────────▼───────────┐│
-                    │ 7. Anchor偏移校正     ││
-                    │    全传感器坐标重建   ││
-                    └──────────┬───────────┘│
-                               │            │
-                    ┌──────────▼───────────┐│
-                    │ 8. BuildStylusPacket ◄┘│
-                    │    映射到HID报告      │
-                    │    [0, 16000]         │
-                    └──────────────────────┘
+```mermaid
+flowchart TD
+    A["原始帧数据\n~5402 bytes"] --> B["Slave Frame\n339 bytes"]
+    A --> C["Master Frame\n5063 bytes\n(触控数据, 不使用)"]
+
+    B --> D["ParseSlaveWords\n校验 + 解析 166 words"]
+    B --> E["ExtractSlaveHeader\npress / btn / status"]
+
+    D --> F["ExtractGridFromSlaveWords\nTX1: anchor + 9×9 grid\nTX2: anchor + 9×9 grid"]
+
+    F --> G["FindPeak\nflood-fill 局部最大值"]
+    G --> H["ProjectTo1D\n行列求和投影"]
+    H --> I["CoordinateSolver\n三角插值 (TSACore算法)"]
+    I --> J["Anchor 偏移校正\nfullCoord = anchor×1024\n+ gridLocal − 4×1024"]
+    J --> K["BuildStylusPacket\n映射到 HID [0, 16000]"]
+    E --> K
+
+    style A fill:#334155,stroke:#94a3b8,color:#f1f5f9
+    style B fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
+    style D fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
+    style E fill:#3b1f5e,stroke:#a78bfa,color:#ede9fe
+    style F fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
+    style G fill:#14532d,stroke:#4ade80,color:#dcfce7
+    style H fill:#14532d,stroke:#4ade80,color:#dcfce7
+    style I fill:#14532d,stroke:#4ade80,color:#dcfce7
+    style J fill:#7c2d12,stroke:#fb923c,color:#ffedd5
+    style K fill:#7c2d12,stroke:#fb923c,color:#ffedd5
+    style C fill:#1c1917,stroke:#57534e,color:#a8a29e
 ```
 
 ## 2. 数据帧结构
 
 ### 2.1 完整帧布局
-```
-Offset      Size    Description
-──────────────────────────────────
-0x0000      5063    Master Frame (触控数据, 手写笔管线不直接使用)
-0x13C7      339     Slave Frame  (手写笔核心数据)
-```
+
+| Offset | Size | Description |
+|--------|------|-------------|
+| `0x0000` | 5063 | Master Frame (触控 mutual capacitance, 本管线不直接使用) |
+| `0x13C7` | 339 | Slave Frame (手写笔核心数据) |
 
 ### 2.2 Slave Frame 结构
 
+```mermaid
+block-beta
+    columns 5
+
+    block:header:2
+        columns 1
+        h["Header (7 bytes)"]
+        s0["[0..1] status (u16 LE)"]
+        s1["[2..3] freq (u16 LE)"]
+        s2["[4..5] pressure (u16 LE)"]
+        s3["[6] button (u8)"]
+    end
+
+    block:payload:3
+        columns 1
+        p["Payload (332 bytes = 166 words)"]
+
+        block:tx1:1
+            columns 1
+            t1["TX1 Block — 83 words"]
+            a1["word 0: anchorRow"]
+            a2["word 1: anchorCol"]
+            g1["word 2..82: 9×9 grid (81 values)"]
+        end
+
+        block:tx2:1
+            columns 1
+            t2["TX2 Block — 83 words"]
+            a3["word 83: anchorRow"]
+            a4["word 84: anchorCol"]
+            g2["word 85..165: 9×9 grid (81 values)"]
+        end
+    end
+
+    style header fill:#3b1f5e,stroke:#a78bfa,color:#ede9fe
+    style payload fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
+    style tx1 fill:#14532d,stroke:#4ade80,color:#dcfce7
+    style tx2 fill:#14532d,stroke:#4ade80,color:#dcfce7
 ```
-┌─────────── Slave Frame (339 bytes) ──────────────────────────┐
-│                                                               │
-│  ┌── Header (7 bytes) ──┐  ┌── Payload (332 bytes) ────────┐ │
-│  │ [0..1] status (u16)  │  │ 166 words × 2 bytes = 332     │ │
-│  │ [2..3] freq   (u16)  │  │                                │ │
-│  │ [4..5] press  (u16)  │  │ ┌── TX1 Block (83 words) ──┐  │ │
-│  │ [6]    button (u8)   │  │ │ word[0]: anchorRow        │  │ │
-│  └──────────────────────┘  │ │ word[1]: anchorCol        │  │ │
-│                             │ │ word[2..82]: 9×9 grid     │  │ │
-│                             │ └───────────────────────────┘  │ │
-│                             │ ┌── TX2 Block (83 words) ──┐  │ │
-│                             │ │ word[83]: anchorRow       │  │ │
-│                             │ │ word[84]: anchorCol       │  │ │
-│                             │ │ word[85..165]: 9×9 grid   │  │ │
-│                             │ └───────────────────────────┘  │ │
-│                             └────────────────────────────────┘ │
-└───────────────────────────────────────────────────────────────┘
+
+> [!IMPORTANT]
+> **Anchor 含义**: `anchorRow` / `anchorCol` 代表 9×9 grid 的 **中心位置** (grid index 4) 在完整传感器阵列上的坐标。这是固件在扫描时确定的笔的大致位置。
+
+### 2.3 TX Block 内 Grid 排列
+
+9×9 grid 按**行优先**存储在 word[2..82] 中:
+
 ```
+grid[r][c] = (int16_t) words[2 + r × 9 + c]
 
-### 2.3 TX1/TX2 Grid Block
-
-每个 Block 包含 83 个 uint16 words:
-- **word[0]**: `anchorRow` — 9×9 窗口中心在完整传感器上的行号
-- **word[1]**: `anchorCol` — 9×9 窗口中心在完整传感器上的列号
-- **word[2..82]**: 9×9 grid 值 (int16)，按行优先排列
-
-> **Anchor 含义**: anchor 代表 9×9 grid 的**中心位置** (index 4)
-> 在完整传感器阵列上的坐标。这是固件在扫描时确定的笔的大致位置。
+     c=0  c=1  c=2  ...  c=8
+r=0 [ w2   w3   w4  ...  w10 ]
+r=1 [ w11  w12  w13 ...  w19 ]
+ ⋮
+r=8 [ w74  w75  w76 ...  w82 ]
+```
 
 ## 3. 坐标解算流程详解
 
-### 3.1 Step 1: Slave Words 解析 (`ParseSlaveWords`)
+### 3.1 Step 1 — Slave Words 解析
 
-```
-输入: rawData[kMasterFrameBytes + 7 ..]
-输出: uint16_t words[166]
+> 📄 [StylusPipeline.cpp](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/StylusPipeline.cpp#L28-L52) :: `ParseSlaveWords`
 
-处理:
-  1. 跳过 slave header 的 7 字节
-  2. 读取 166 个 little-endian uint16 words
-  3. (可选) 校验和验证: sum(all_words) & 0xFFFF == 0
-```
+- 跳过 slave header 的 7 字节
+- 读取 166 个 little-endian uint16 words
+- (可选) 校验和验证: `sum(all_words) & 0xFFFF == 0`
 
-### 3.2 Step 2: Grid 提取 (`ExtractGridFromSlaveWords`)
+### 3.2 Step 2 — Grid 提取
 
-```
-输入: words[166]
-输出: AsaGridData { tx1: FreqBlock, tx2: FreqBlock }
+> 📄 [AsaTypes.h](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/AsaTypes.h#L71-L99) :: `ExtractGridFromSlaveWords`
 
-TX1 Block (words [0..82]):
-  anchorRow = words[0]
-  anchorCol = words[1]
-  grid[r][c] = (int16_t)words[2 + r*9 + c]
-
-TX2 Block (words [83..165]):
-  anchorRow = words[83]
-  anchorCol = words[84]
-  grid[r][c] = (int16_t)words[85 + r*9 + c]
-
-有效性判断:
-  TX1.valid = (anchorRow != 0x00FF) || (anchorCol != 0x00FF)
-  TX2.valid = TX1.valid  (TX2在无笔时输出垃圾)
+```cpp
+TX1.anchorRow = words[0];
+TX1.anchorCol = words[1];
+TX1.grid[r][c] = (int16_t) words[2 + r*9 + c];
+TX1.valid = (anchorRow != 0x00FF) || (anchorCol != 0x00FF);
 ```
 
-### 3.3 Step 3: Peak 检测 (`GridPeakDetector::FindPeak`)
+### 3.3 Step 3 — Peak 检测
 
-在 9×9 grid 上进行 flood-fill peak 检测:
+> 📄 [GridPeakDetector.cpp](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/GridPeakDetector.cpp#L76-L103) :: `FindPeak`
+
+```mermaid
+flowchart LR
+    A["遍历 9×9\n每个 cell"] --> B{"IsPeak?\n4-邻域局部最大值\n且 > noiseThreshold"}
+    B -- Yes --> C["FloodFill\n计算连通区域"]
+    B -- No --> A
+    C --> D{"connectedPixels\n< maxConnected?"}
+    D -- Yes --> E["计算 3×3\n邻域和"]
+    D -- No --> A
+    E --> F{"邻域和 >\nbest?"}
+    F -- Yes --> G["更新 bestPeak"]
+    F -- No --> A
+
+    style B fill:#14532d,stroke:#4ade80,color:#dcfce7
+    style D fill:#7c2d12,stroke:#fb923c,color:#ffedd5
+    style G fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `noiseThreshold` | 50 | 低于此值的 cell 视为噪声 |
+| `maxConnected` | 20 | 连通区域超过此值视为噪声块 |
+
+### 3.4 Step 4 — 1D 投影
+
+> 📄 [GridPeakDetector.cpp](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/GridPeakDetector.cpp#L106-L139) :: `ProjectTo1D`
+
+以 peak 为中心，取 ±`projRadius` (默认 2) 行/列做求和投影:
 
 ```
-算法:
-  for each cell (r, c) in grid:
-    if IsPeak(r, c):   // 4-邻域局部最大值 && > noiseThreshold
-      FloodFill 计算连通区域大小
-      if connectedPixels < maxConnected:  // 排除大面积噪声
-        计算 3×3 邻域和
-        保留邻域和最大的 peak
-
-输出: GridPeakUnit { peakRow, peakCol, peakValue, valid }
-
-参数:
-  noiseThreshold = 50   (低于此值视为噪声)
-  maxConnected   = 20   (超过此值视为噪声块)
-```
-
-### 3.4 Step 4: 1D 投影 (`GridPeakDetector::ProjectTo1D`)
-
-将 9×9 grid 按行/列分别求和，生成两条 1D 信号:
-
-```
-projRadius = 2 (以 peak 为中心 ±2 行/列作为投影范围)
-
-dim1[c] = Σ grid[rMin..rMax][c]   (c = 0..8)  → 列方向投影
-dim2[r] = Σ grid[r][cMin..cMax]   (r = 0..8)  → 行方向投影
-
-其中:
-  rMin = max(0, peakRow - projRadius)
-  rMax = min(8, peakRow + projRadius)
-  cMin = max(0, peakCol - projRadius)
-  cMax = min(8, peakCol + projRadius)
+dim1[c] = Σ grid[rMin..rMax][c]   (c = 0..8)  → 列方向信号
+dim2[r] = Σ grid[r][cMin..cMax]   (r = 0..8)  → 行方向信号
 
 peakIdxDim1 = argmax(dim1)
 peakIdxDim2 = argmax(dim2)
 ```
 
-### 3.5 Step 5: 三角插值 (`CoordinateSolver`)
+### 3.5 Step 5 — 三角插值 (核心算法)
 
-基于 1D 投影的 peak 位置进行亚像素精度插值。
+> 📄 [CoordinateSolver.cpp](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/CoordinateSolver.cpp) :: 逆向自 TSACore.dll `TriangleAlgUsing3Piont`
 
-#### 3.5.1 中间位置: `TriangleAlgUsing3Point`
+```mermaid
+flowchart TD
+    A["1D 投影 signal\n+ peakIdx"] --> B{"peakIdx == 0?"}
+    B -- "左边缘" --> C["TriangleAlgEdge\n用虚拟邻居补偿"]
+    B -- No --> D{"peakIdx == 8?"}
+    D -- "右边缘" --> E["TriangleAlgEdge\nresult = 9×1024 − edge"]
+    D -- "中间" --> F["TriangleAlgUsing3Point\nleft, peak, right"]
 
-这是逆向自 TSACore.dll 的原始算法:
+    F --> G["比较 left vs right"]
+    G -- "right < left\n(偏左)" --> H["minVal = min(right, peak−1)\nratio = −(left−min)×1024 / (peak−min) / 2"]
+    G -- "right ≥ left\n(偏右)" --> I["minVal = min(left, peak−1)\nratio = +(right−min)×1024 / (peak−min) / 2"]
+    H --> J["result = ratio + 0x200\n(+512 半格偏移)"]
+    I --> J
 
-```
-输入: left (信号[peak-1]), peak (信号[peak]), right (信号[peak+1])
+    J --> K["gridLocal = peakIdx × 1024 + result"]
 
-if right < left:  // peak 偏左
-    minVal = min(right, peak-1)
-    ratio = (left - minVal) * 1024 / (peak - minVal)
-    result = -(ratio / 2)
-else:             // peak 偏右或居中
-    minVal = min(left, peak-1)
-    ratio = (right - minVal) * 1024 / (peak - minVal)
-    result = +(ratio / 2)
+    C --> K
+    E --> K
 
-result += 0x200   // 加上半格偏移 (512)
-
-最终坐标 = peakIdx * 0x400 + result
-```
-
-**结果范围**: `[peakIdx * 1024, (peakIdx+1) * 1024)` 内的亚像素位置
-
-#### 3.5.2 边缘位置: `TriangleAlgEdge`
-
-当 peak 在 grid 边缘 (index 0 或 8) 时，用虚拟邻居代替不存在的邻域:
-
-```
-EdgeCompensating(peak, n1, n2, param1):
-  comp1 = (peak - n1) * 10 / param1
-  comp2 = peak - (n1 - n2) * param1 / 10
-  virtualNeighbor = max(comp1, comp2)
-  if virtualNeighbor >= peak: virtualNeighbor = peak - 1
-
-然后调用 TriangleAlgUsing3Point(virtualNeighbor, peak, n1)
-
-左边缘(peakIdx=0): 直接使用结果
-右边缘(peakIdx=8): result = 9*1024 - edgeResult
+    style F fill:#14532d,stroke:#4ade80,color:#dcfce7
+    style J fill:#7c2d12,stroke:#fb923c,color:#ffedd5
+    style K fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
 ```
 
-### 3.6 Step 6: Anchor 偏移 (全传感器坐标重建)
+> [!NOTE]
+> `0x200` (512) 偏移将结果定位在 cell 中心。当三个信号值相等时，`ratio = 0`，结果为 `peakIdx × 1024 + 512` — 即 cell 正中央。
 
-**这是最关键的步骤。**
+### 3.6 Step 6 — Anchor 偏移 (关键步骤)
 
-9×9 grid 只是完整传感器阵列的一个局部窗口。
-grid 内的坐标需要加上 anchor 偏移才能得到全传感器坐标:
+> 📄 [StylusPipeline.cpp](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/StylusPipeline.cpp#L247-L264) :: 坐标重建
 
-```
-gridLocalX = CoordinateSolver.dim1   (范围 [0, 9*1024) ≈ [0, 9216))
-gridLocalY = CoordinateSolver.dim2
+```mermaid
+flowchart LR
+    subgraph "9×9 Grid 局部坐标"
+        GL["gridLocalX ≈ 4×1024 + 512\n= 4608 (peak在中心时)"]
+    end
 
-gridCenter = 4  (kGridDim / 2)
-kCoorUnit  = 1024
+    subgraph "Anchor 信息"
+        AN["anchorRow = 笔在传感器上的\n大致行号 (grid 中心)"]
+    end
 
-fullSensorX = anchor.row * kCoorUnit + gridLocalX - gridCenter * kCoorUnit
-fullSensorY = anchor.col * kCoorUnit + gridLocalY - gridCenter * kCoorUnit
-```
+    GL --> CALC
+    AN --> CALC
 
-**为什么要减去 gridCenter * kCoorUnit:**
-anchor 是 grid 的**中心**: 当笔在 anchor 正上方时，
-peak 位于 grid index 4，gridLocalX ≈ 4 * 1024 + 512 = 4608。
-不减去中心偏移的话，坐标会固定偏移约 4096。
+    CALC["fullSensorX =\nanchor × 1024\n+ gridLocal\n− 4 × 1024"] --> RESULT["全传感器坐标"]
 
-### 3.7 Step 7: HID 报告映射 (`BuildStylusPacket`)
-
-将全传感器坐标映射到 HID 逻辑范围 [0, 16000]:
-
-```
-sensorRangeX = sensorDimX * 1024  (如: 37 * 1024 = 37888)
-sensorRangeY = sensorDimY * 1024  (如: 23 * 1024 = 23552)
-
-reportX = (1.0 - fullSensorX / sensorRangeX) * 16000   // X 轴反转
-reportY = fullSensorY / sensorRangeY * 16000
-
-输出: [0, 16000] → Windows 通过 HID 描述符映射到屏幕像素
+    style GL fill:#14532d,stroke:#4ade80,color:#dcfce7
+    style AN fill:#3b1f5e,stroke:#a78bfa,color:#ede9fe
+    style CALC fill:#7c2d12,stroke:#fb923c,color:#ffedd5
+    style RESULT fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
 ```
 
-> **注意**: X 轴反转 (`1.0 - ...`) 是横屏方向约定所需。
-
-## 4. 原厂 vs 我们的实现差异
-
-### 4.1 原厂 TSACore 的数据流
-
+**公式**:
 ```
-Himax 固件                ThpService (Himax驱动)           TSACore
-  │                              │                           │
-  ├── slave frame ──────────────►│                           │
-  │   (9×9 grid + anchor)       │                           │
-  │                              │ 创建 fullDim×fullDim      │
-  │                              │ 零矩阵                   │
-  │                              │                           │
-  │                              │ 将 9×9 贴到              │
-  │                              │ anchor 位置               │
-  │                              │                           │
-  │                              ├── 完整矩阵 ──────────────►│
-  │                              │   (37×23 或类似)          │
-  │                              │                           │
-  │                              │                  完整维度 1D 投影
-  │                              │                  Peak 在全局位置
-  │                              │                  坐标直接正确
+fullSensorX = (anchorRow − gridCenter) × kCoorUnit + gridLocalX
+fullSensorY = (anchorCol − gridCenter) × kCoorUnit + gridLocalY
+
+其中 gridCenter = 4, kCoorUnit = 1024
 ```
 
-### 4.2 我们的等效方案
+> [!WARNING]
+> 如果不减去 `gridCenter × kCoorUnit`，坐标会固定偏移 ~4096，因为 anchor 指的是 grid **中心** 而非左上角。
+
+### 3.7 Step 7 — HID 报告映射
+
+> 📄 [StylusPipeline.cpp](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/StylusPipeline.cpp#L572-L608) :: `BuildStylusPacket`
 
 ```
-Himax 固件                EGoTouchService
-  │                              │
-  ├── slave frame ──────────────►│
-  │   (9×9 grid + anchor)       │
-  │                              │
-  │                              │ 直接在 9×9 grid 上:
-  │                              │   Peak detection
-  │                              │   1D 投影 (长度=9)
-  │                              │   三角插值
-  │                              │   → gridLocal 坐标
-  │                              │
-  │                              │ 加上 anchor 偏移:
-  │                              │   fullCoord = anchor*1024
-  │                              │              + gridLocal
-  │                              │              - 4*1024
-  │                              │
-  │                              │ 映射到 HID 范围
+reportX = (1.0 − fullSensorX / (sensorDimX × 1024)) × 16000
+reportY = fullSensorY / (sensorDimY × 1024) × 16000
+
+输出范围: [0, 16000] → Windows HID 映射到屏幕像素 (2560×1600)
 ```
 
-**等效性**: 两种方法在数学上等价。
-原厂在完整矩阵中做的投影，只有 anchor 位置附近的 9×9 区域有非零值，
-所以 peak 总是在 `[anchor, anchor+8]` 范围内，
-最终坐标 = `(anchor + peakIdx) * 1024 + subOffset` — 与我们的结果一致。
+X 轴反转 (`1.0 − ...`) 是横屏方向约定。
 
-## 5. 关键参数
+## 4. 原厂 vs 我们的实现
+
+```mermaid
+flowchart TD
+    subgraph "原厂 ThpService + TSACore"
+        direction TB
+        O1["Himax 固件输出\nslave frame\n9×9 grid + anchor"] --> O2["ThpService\n(Himax驱动)"]
+        O2 --> O3["创建 fullDim × fullDim\n零矩阵 (如 37×23)"]
+        O3 --> O4["将 9×9 贴到\nanchor 位置"]
+        O4 --> O5["TSACore 收到完整矩阵\n长度=37 的 1D 投影\nPeak 在全局位置"]
+        O5 --> O6["坐标直接正确\n无需 anchor 偏移"]
+    end
+
+    subgraph "EGoTouchService (我们)"
+        direction TB
+        E1["Himax 固件输出\nslave frame\n9×9 grid + anchor"] --> E2["直接在 9×9 上\nPeak detection\n1D 投影 (长度=9)"]
+        E2 --> E3["三角插值\ngridLocal 坐标\n(范围 0~9216)"]
+        E3 --> E4["加 anchor 偏移\n减 gridCenter\n→ 全传感器坐标"]
+        E4 --> E5["映射到 HID"]
+    end
+
+    style O1 fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
+    style O4 fill:#7c2d12,stroke:#fb923c,color:#ffedd5
+    style O6 fill:#14532d,stroke:#4ade80,color:#dcfce7
+    style E1 fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
+    style E4 fill:#7c2d12,stroke:#fb923c,color:#ffedd5
+    style E5 fill:#14532d,stroke:#4ade80,color:#dcfce7
+```
+
+> [!TIP]
+> 两种方案**数学等价**: 原厂在完整矩阵中做投影时，只有 anchor 附近的 9×9 区域有非零值，peak 总是在 `[anchor, anchor+8]` 范围内。我们直接用 anchor 偏移得到相同结果。
+
+## 5. 关键参数表
 
 | 参数 | 值 | 说明 |
 |------|------|------|
-| kGridDim | 9 | 网格维度 |
-| kCoorUnit | 1024 (0x400) | 每传感器间距的子单位数 |
-| kGridCenter | 4 | 网格中心索引 |
-| sensorDimX | **待确定** (默认37) | 完整传感器行数 |
-| sensorDimY | **待确定** (默认23) | 完整传感器列数 |
-| noiseThreshold | 50 | Peak 检测噪声门限 |
+| `kGridDim` | 9 | 网格维度 |
+| `kCoorUnit` | 1024 (`0x400`) | 每传感器间距的子单位数 |
+| `kGridCenter` | 4 | 网格中心索引 (`kGridDim / 2`) |
+| `sensorDimX` | **待确定** (默认 37) | 完整传感器行数 |
+| `sensorDimY` | **待确定** (默认 23) | 完整传感器列数 |
+| `noiseThreshold` | 50 | Peak 检测信号门限 |
+| `projRadius` | 2 | 1D 投影的行/列范围 |
 | HID Report Max | 16000 | HID 逻辑坐标最大值 |
 | 屏幕分辨率 | 2560 × 1600 | Gaokun CSOT 面板 |
 
-### 5.1 确定 sensorDimX/Y 的方法
+### 确定 sensorDimX/Y
 
-将笔移到屏幕四角，观察日志中的 anchor 值:
+将笔移到屏幕四角，观察日志 `Anchor` 行的值:
 
 ```
-sensorDimX = maxAnchorRow + kGridDim    // 最大 anchorRow + 9
-sensorDimY = maxAnchorCol + kGridDim    // 最大 anchorCol + 9
+sensorDimX = max(anchorRow) + kGridDim   (最大 anchorRow + 9)
+sensorDimY = max(anchorCol) + kGridDim   (最大 anchorCol + 9)
 ```
 
-也可通过 GUI 中的 `Sensor Dim X/Y` 滑块实时调整，直到坐标范围正确覆盖屏幕。
-
-## 6. Pressure 和 Button 提取
+## 6. Pressure / Button 处理
 
 ### 6.1 数据来源
 
-压力和按钮数据从 **slave frame header** (前 7 字节) 提取:
+从 **slave frame header** (前 7 字节) 提取:
 
+| Offset | Size | Field |
+|--------|------|-------|
+| 0-1 | uint16 LE | status |
+| 2-3 | uint16 LE | frequency |
+| 4-5 | uint16 LE | pressure `[0, 0x0FFF]` |
+| 6 | uint8 | button (bit 0 = pressed) |
+
+> [!NOTE]
+> 此布局基于 Himax HPP3 协议假设，需通过日志中 `SlaveHdr` 的实际字节验证。
+
+### 6.2 Pressure 处理链
+
+```mermaid
+flowchart LR
+    A["raw pressure\n(uint16)"] --> B["分段多项式\nmapping"]
+    B --> C["增益缩放\n×gainPercent/100"]
+    C --> D["IIR 低通\n滤波"]
+    D --> E["尾部衰减\n(释放时)"]
+    E --> F["输出\n[0, 4095]"]
+
+    style A fill:#3b1f5e,stroke:#a78bfa,color:#ede9fe
+    style B fill:#14532d,stroke:#4ade80,color:#dcfce7
+    style D fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
+    style F fill:#7c2d12,stroke:#fb923c,color:#ffedd5
 ```
-slave[0..1]: status   (uint16 LE)
-slave[2..3]: freq     (uint16 LE)
-slave[4..5]: pressure (uint16 LE, 范围 [0, 0x0FFF])
-slave[6]:    button   (uint8, bit 0 = 按下)
-```
-
-> **注意**: 具体字节布局可能需要根据实际日志调整。
-> 日志标签 `SlaveHdr` 每 120 帧输出一次原始字节用于验证。
-
-### 6.2 Pressure 处理 (`SolvePressure`)
-
-```
-1. 分段多项式映射:
-   if raw <= 11:  mapped = min(raw, 1)
-   elif raw <= 127: mapped = seg1 polynomial (4th order)
-   else:           mapped = seg2 polynomial (4th order)
-
-2. 增益: mapped *= gainPercent / 100
-
-3. IIR 滤波: smoothed = prev * (128-w)/128 + mapped * w/128
-
-4. 尾部衰减: 释放时逐帧递减
-
-5. 输出范围: [0, 0x0FFF] = [0, 4095]
-```
-
-### 6.3 Button 处理 (`UpdateButtonState`)
-
-```
-if !active:  button = 0
-elif rawBits & 1:  button = 1, hold counter = N
-elif hold counter > 0:  button = 1, counter--
-else: button = 0
-```
-
-Button 有 `releaseHoldFrames` (默认 2) 帧的维持时间防抖。
 
 ## 7. 文件索引
 
 | 文件 | 职责 |
 |------|------|
-| `AsaTypes.h` | 常量、数据结构定义 |
-| `GridPeakDetector.cpp` | Peak 检测 + 1D 投影 |
-| `CoordinateSolver.cpp` | 三角插值坐标解算 |
-| `CoorPostProcessor.cpp` | 坐标后处理 (IIR, jitter) |
-| `StylusPipeline.cpp` | 主管线、帧解析、anchor偏移、HID报告 |
-| `StylusPipeline.h` | 所有可配置参数定义 |
+| [AsaTypes.h](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/AsaTypes.h) | 常量、数据结构、Grid 提取 |
+| [GridPeakDetector.cpp](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/GridPeakDetector.cpp) | Peak 检测 + 1D 投影 |
+| [CoordinateSolver.cpp](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/CoordinateSolver.cpp) | 三角插值坐标解算 |
+| [CoorPostProcessor.cpp](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/CoorPostProcessor.cpp) | 坐标后处理 (IIR, jitter) |
+| [StylusPipeline.cpp](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/StylusPipeline.cpp) | 主管线、帧解析、anchor偏移、HID |
+| [StylusPipeline.h](file:///d:/source/repos/EGoTouchRev-rebuild-自建算法/EGoTouchService/Engine/StylusSolver/StylusPipeline.h) | 所有可配置参数定义 |
 
-## 8. 已知问题与待办
+## 8. 已知问题
 
-- [ ] **sensorDimX/Y 待确定**: 需要观测实际 anchor 范围
-- [ ] **Slave header 字节布局**: pressure/button 位置假设,需通过日志验证
-- [ ] **Tilt 输出**: 暂时禁用,需正确 TX2 参数后启用
-- [ ] **EdgeCompensating 参数**: 当前使用默认值, 应从 TSAPrmt 中提取
-- [ ] **CoorMultiOrderFitCompensate**: 原厂有多项式校正, 当前未实现
-- [ ] **SensorPitchSizeMap**: 原厂有非线性传感器间距映射, 当前用线性近似
+- [ ] `sensorDimX` / `sensorDimY` 待通过实际 anchor 范围确定
+- [ ] Slave header 字节布局需日志验证 (pressure/button 偏移)
+- [ ] Tilt 输出暂时禁用，需正确 TX2 参数
+- [ ] `CoorMultiOrderFitCompensate` (多项式校正) 未实现
+- [ ] `SensorPitchSizeMap` (非线性间距映射) 未实现，当前为线性近似
+- [ ] Edge compensation 参数使用默认值，应从 TSAPrmt 提取

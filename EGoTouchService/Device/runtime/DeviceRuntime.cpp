@@ -181,8 +181,11 @@ bool DeviceRuntime::DrainCommands() {
         m_lastCmdId = qc.id;
         if (auto r = m_chip.afe_sendCommand(qc.cmd); !r) {
             RecordHistory(qc, false, "afe_sendCommand failed");
-            m_state.store(workerState::recover);
-            return false;
+            LOG_WARN("Device", "DrainCommands", "CmdExec",
+                     "Command '{}' (type={}) failed — skipping (non-fatal).",
+                     qc.reason, static_cast<int>(qc.cmd.type));
+            // 不再触发 recover: AFE 命令失败不代表 bus 挂了
+            continue;
         }
         RecordHistory(qc, true, "OK");
     }
@@ -237,20 +240,43 @@ void DeviceRuntime::OnStreaming() {
     auto res = m_chip.GetFrame();
     if (res == std::unexpected(ChipError::Timeout)) return;
     if (!res) {
-        m_state.store(workerState::recover);
+        // 连续 N 帧非Timeout失败才进入 recover；
+        // AFE 命令（如 EnableFreqShift）可能导致一两帧 bus 暂时失响应，不算致命。
+        m_consecutiveFrameErrors++;
+        if (m_consecutiveFrameErrors >= kMaxConsecutiveFrameErrors) {
+            LOG_ERROR("Device", "OnStreaming", "Streaming",
+                      "{} consecutive GetFrame failures → recover.",
+                      m_consecutiveFrameErrors);
+            m_consecutiveFrameErrors = 0;
+            m_state.store(workerState::recover);
+        } else {
+            LOG_WARN("Device", "OnStreaming", "Streaming",
+                     "GetFrame failed ({}/{}), retrying...",
+                     m_consecutiveFrameErrors, kMaxConsecutiveFrameErrors);
+        }
         return;
+    }
+    m_consecutiveFrameErrors = 0;  // 成功读帧重置计数
+
+    const bool touchOnly = m_touchOnly.load(std::memory_order_relaxed);
+
+    // 0. 手写笔频率跟踪（仅 Full 模式）
+    if (!touchOnly) {
+        m_chip.ProcessStylusStatus();
     }
 
     const auto& rawData = m_chip.back_data;
 
-    // 1. Stylus pipeline (independent, works directly from slave frame)
+    // 1. Stylus pipeline（仅 Full 模式）
     Engine::StylusPacket stylusPacket{};
-    m_stylusPipeline.Process(
-        std::span<const uint8_t>(rawData.data(), rawData.size()),
-        stylusPacket);
-    // m_vhfReporter.DispatchStylus(stylusPacket);  // disabled for debugging
+    if (!touchOnly) {
+        m_stylusPipeline.Process(
+            std::span<const uint8_t>(rawData.data(), rawData.size()),
+            stylusPacket);
+        // m_vhfReporter.DispatchStylus(stylusPacket);  // disabled for debugging
+    }
 
-    // 2. Touch pipeline (independent, works from master frame)
+    // 2. Touch pipeline (always active)
     Engine::HeatmapFrame touchFrame;
     touchFrame.rawData.assign(rawData.begin(), rawData.end());
     m_touchPipeline.Execute(touchFrame);
@@ -258,8 +284,10 @@ void DeviceRuntime::OnStreaming() {
 
     // 3. Merge results for UI push
     if (m_framePushCb) {
-        touchFrame.stylus = m_stylusPipeline.GetLastResult();
-        touchFrame.stylus.packet = stylusPacket;
+        if (!touchOnly) {
+            touchFrame.stylus = m_stylusPipeline.GetLastResult();
+            touchFrame.stylus.packet = stylusPacket;
+        }
         m_framePushCb(touchFrame);
     }
 }
@@ -273,12 +301,30 @@ bool DeviceRuntime::OnQuit() {
 
 void DeviceRuntime::OnRecover() {
     m_recoverCount++;
-    if (m_recoverCount > 10) {
+
+    // 最大重试 30 次（500ms 间隔 ≈ 15 秒恢复窗口）
+    if (m_recoverCount > 30) {
+        LOG_ERROR("Device", "OnRecover", "Recover",
+                  "Exceeded 30 recovery attempts, giving up.");
         m_state.store(workerState::quit);
         return;
     }
+
+    // 等待 500ms 再重试，给硬件从休眠/灭屏恢复的时间
+    // 期间每 50ms 检查一次 stop 请求以保持响应性
+    for (int i = 0; i < 10; ++i) {
+        if (m_stopReq.load(std::memory_order_relaxed)) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    LOG_INFO("Device", "OnRecover", "Recover",
+             "Recovery attempt {}/30...", m_recoverCount);
+
     if (auto res = m_chip.check_bus(); !res) return;
     if (auto res = m_chip.Init(); !res) return;
+
+    LOG_INFO("Device", "OnRecover", "Recover",
+             "Recovery succeeded after {} attempts.", m_recoverCount);
     m_state.store(workerState::streaming);
     m_recoverCount = 0;
 }

@@ -9,6 +9,9 @@
            UpgradeCode="434AC770-0762-431A-9ABC-DB2F9DB289AC" 
            Scope="perMachine">
 
+    <!-- 支持自动覆盖升级：只要 UpgradeCode 不变，且提升 Version 号，它就会自动卸载旧版并覆盖安装新版 -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." AllowSameVersionUpgrades="yes" />
+
     <!-- 开启基础的安装界面 UI (会提供一个“我同意”“下一步”“安装”的向导) -->
     <ui:WixUI Id="WixUI_Minimal" />
     <WixVariable Id="WixUILicenseRtf" Value="scripts\\EULA.rtf" />

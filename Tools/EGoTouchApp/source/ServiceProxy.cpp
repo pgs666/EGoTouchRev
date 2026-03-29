@@ -47,10 +47,10 @@ ServiceProxy::~ServiceProxy() {
 }
 
 bool ServiceProxy::Connect() {
-    // 1. Create shared memory (App owns it)
-    if (!m_frameReader.Create(kSharedMemName)) {
+    // 1. Open shared memory (Service owns the Global\\ mapping)
+    if (!m_frameReader.Open(kSharedMemName)) {
         LOG_ERROR("App", "ServiceProxy::Connect", "IPC",
-                  "Failed to create shared memory.");
+                  "Failed to open shared memory (Service not running?).");
         return false;
     }
     // 2. Open config dirty flag

@@ -14,6 +14,7 @@ constexpr std::chrono::milliseconds kEventDebounce{400};
 
 const char* ToString(workerState s) noexcept {
     switch (s) {
+    case workerState::suspend:   return "suspend";
     case workerState::quit:      return "quit";
     case workerState::ready:     return "ready";
     case workerState::streaming: return "streaming";
@@ -42,9 +43,9 @@ DeviceRuntime::~DeviceRuntime() { Stop(); }
 
 bool DeviceRuntime::Start() {
     if (m_running.exchange(true)) return false;
-    m_stopReq.store(false);       // ← critical: clear stop flag for restart
+    m_stopReason.store(StopReason::None);  // ← critical: clear stop reason for restart
     m_state.store(workerState::ready);
-    m_shutdownReq = false;
+    m_needSuspendDeinit = false;
     m_recoverCount = 0;
     m_lastNote = "Runtime started";
     m_thread = std::thread(&DeviceRuntime::WorkerMain, this);
@@ -54,7 +55,7 @@ bool DeviceRuntime::Start() {
 }
 
 void DeviceRuntime::Stop() {
-    m_stopReq.store(true);
+    m_stopReason.store(StopReason::Shutdown);
     if (m_thread.joinable()) m_thread.join();
     m_running.store(false);
     m_state.store(workerState::quit);
@@ -62,7 +63,7 @@ void DeviceRuntime::Stop() {
 }
 
 bool DeviceRuntime::IsShutdownRequested() const {
-    return m_shutdownReq;
+    return m_stopReason.load() == StopReason::Shutdown;
 }
 
 // --------------- 命令注入 ---------------
@@ -98,25 +99,31 @@ void DeviceRuntime::IngestSystemEvent(
     case ET::DisplayOff:
     case ET::LidOff:
         LOG_INFO("Device", "IngestSystemEvent", "Policy",
-                 "Sleep event ({}), requesting worker stop.",
+                 "Sleep event ({}), requesting suspend.",
                  Host::ToString(ev.type));
-        m_stopReq.store(true);
+        m_chip.CancelPendingFrameRead();  // abort any blocking GetFrame NOW
+        m_stopReason.store(StopReason::ScreenOff);
         break;
     case ET::DisplayOn:
     case ET::LidOn:
     case ET::ResumeAutomatic:
         LOG_INFO("Device", "IngestSystemEvent", "Policy",
-                 "Wake event ({}), attempting restart.",
+                 "Wake event ({}), attempting resume.",
                  Host::ToString(ev.type));
-        // Ensure old worker thread is fully joined before restarting
-        Stop();
-        Start();
+        // suspend 状态下直接恢复，无需重建线程
+        if (m_state.load() == workerState::suspend) {
+            m_state.store(workerState::ready);
+            LOG_INFO("Device", "IngestSystemEvent", "Policy",
+                     "Resumed from suspend → ready (zero-cost wakeup).");
+        } else {
+            Stop();
+            Start();
+        }
         break;
     case ET::Shutdown:
         LOG_INFO("Device", "IngestSystemEvent", "Policy",
                  "Shutdown event, requesting termination.");
-        m_shutdownReq = true;
-        m_stopReq.store(true);
+        m_stopReason.store(StopReason::Shutdown);
         break;
     default: break;
     }
@@ -196,19 +203,32 @@ bool DeviceRuntime::DrainCommands() {
 
 ThreadResult DeviceRuntime::WorkerMain() {
     while (true) {
-        if (m_stopReq.load(std::memory_order_acquire)) {
-            m_state.store(workerState::quit);
-            m_stopReq.store(false, std::memory_order_release);
+        // ── 检查停止请求，根据 StopReason 分流到 suspend 或 quit ──
+        auto reason = m_stopReason.exchange(StopReason::None,
+                                            std::memory_order_acq_rel);
+        if (reason != StopReason::None) {
+            if (reason == StopReason::ScreenOff) {
+                LOG_INFO("Device", "WorkerMain", "StopReq",
+                         "StopReason::ScreenOff consumed → suspend");
+                m_state.store(workerState::suspend);
+                m_needSuspendDeinit = true;   // 延迟到 OnSuspend 首次进入时执行
+            } else {
+                LOG_INFO("Device", "WorkerMain", "StopReq",
+                         "StopReason::Shutdown consumed → quit");
+                m_state.store(workerState::quit);
+            }
             std::lock_guard<std::mutex> lk(m_mu);
             m_cmdQueue.clear();
         }
 
         DrainCommands();
 
-        switch (m_state.load(std::memory_order_acquire)) {
+        auto curState = m_state.load(std::memory_order_acquire);
+        switch (curState) {
         case workerState::ready:     OnReady();     break;
         case workerState::streaming: OnStreaming();  break;
         case workerState::recover:   OnRecover();   break;
+        case workerState::suspend:   OnSuspend();   break;
         case workerState::quit:
             if (OnQuit()) {
                 m_running.store(false);  // allow restart via Start()
@@ -299,21 +319,36 @@ bool DeviceRuntime::OnQuit() {
     return true;  // signal WorkerMain to return
 }
 
+void DeviceRuntime::OnSuspend() {
+    // 首次进入 suspend 时执行 HoldReset（拉低 reset，关闭中断通道）
+    if (m_needSuspendDeinit) {
+        m_chip.HoldReset();
+        m_needSuspendDeinit = false;
+        LOG_INFO("Device", "OnSuspend", "suspend",
+                 "Entered suspend, chip reset held low. "
+                 "Waiting for wake event.");
+    }
+    // 低功耗等待，每 100ms 检查一次状态变更
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+
 void DeviceRuntime::OnRecover() {
     m_recoverCount++;
 
     // 最大重试 30 次（500ms 间隔 ≈ 15 秒恢复窗口）
     if (m_recoverCount > 30) {
         LOG_ERROR("Device", "OnRecover", "Recover",
-                  "Exceeded 30 recovery attempts, giving up.");
-        m_state.store(workerState::quit);
+                  "Exceeded 30 recovery attempts, entering suspend.");
+        m_recoverCount = 0;
+        m_needSuspendDeinit = true;
+        m_state.store(workerState::suspend);
         return;
     }
 
     // 等待 500ms 再重试，给硬件从休眠/灭屏恢复的时间
     // 期间每 50ms 检查一次 stop 请求以保持响应性
     for (int i = 0; i < 10; ++i) {
-        if (m_stopReq.load(std::memory_order_relaxed)) return;
+        if (m_stopReason.load(std::memory_order_relaxed) != StopReason::None) return;
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 

@@ -1,6 +1,6 @@
 #pragma once
 // SharedFrameBuffer: Cross-process shared memory for real-time frame push.
-// Created by EGoTouchApp (reader), opened by EGoTouchService (writer).
+// Created by EGoTouchService (writer, Session 0), opened by EGoTouchApp (reader, user session).
 
 #include <atomic>
 #include <cstdint>
@@ -166,6 +166,7 @@ public:
     SharedFrameWriter& operator=(const SharedFrameWriter&) = delete;
 
     bool Open(const wchar_t* name);
+    bool Create(const wchar_t* name);   // Service creates Global\ mapping
     void Write(const Engine::HeatmapFrame& frame);
     void Close();
     bool IsOpen() const { return m_data != nullptr; }
@@ -184,6 +185,7 @@ public:
     SharedFrameReader& operator=(const SharedFrameReader&) = delete;
 
     bool Create(const wchar_t* name);
+    bool Open(const wchar_t* name);     // App opens existing mapping
     bool Read(Engine::HeatmapFrame& out);
     uint64_t LastFrameId() const;
     const SharedFrameData* Raw() const { return m_data; }

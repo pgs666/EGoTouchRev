@@ -126,6 +126,7 @@ namespace Himax {
             
             ChipResult<> Init(void);
             ChipResult<> Deinit(bool check_en = true); // Replaces Stop
+            void HoldReset();   // Suspend: pull reset low + IntClose, no bus traffic
             ChipResult<> check_bus(void);
             ChipResult<> GetFrame(void);
             void CancelPendingFrameRead();

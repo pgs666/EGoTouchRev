@@ -900,6 +900,23 @@ ChipResult<> Chip::Deinit(bool check_en) {
     return {};
 }
 
+void Chip::HoldReset() {
+    m_connState.store(ConnectionState::Unconnected);
+
+    // 1) Cancel any in-flight GetFrame / bus I/O first
+    CancelPendingFrameRead();
+
+    // 2) Pull reset low — chip powered off, no bus traffic needed
+    (void)m_master->SetReset(false);
+
+    // 3) Close interrupt channels so next Init can IntOpen cleanly
+    (void)m_master->IntClose();
+    (void)m_slave->IntClose();
+
+    LOG_INFO("Device", "Chip::HoldReset", "Unconnected",
+             "Reset held low, interrupt channels closed (suspend).");
+}
+
 Chip::~Chip() {
     if (m_connState.load() != ConnectionState::Unconnected) {
         LOG_INFO("Device", "Chip::~Chip", GetStateStr(), "Implicitly calling Deinit().");

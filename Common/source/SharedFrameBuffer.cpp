@@ -42,6 +42,40 @@ bool SharedFrameWriter::Open(const wchar_t* name) {
     return true;
 }
 
+bool SharedFrameWriter::Create(const wchar_t* name) {
+    SECURITY_DESCRIPTOR sd{};
+    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE);
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = &sd;
+    sa.bInheritHandle = FALSE;
+
+    m_mapHandle = CreateFileMappingW(
+        INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE,
+        0, sizeof(SharedFrameData), name);
+    if (!m_mapHandle) {
+        LOG_ERROR("Ipc", "SharedFrameWriter::Create", "IPC",
+                  "CreateFileMapping failed: {}", GetLastError());
+        return false;
+    }
+    m_data = static_cast<SharedFrameData*>(
+        MapViewOfFile(m_mapHandle, FILE_MAP_WRITE, 0, 0,
+                      sizeof(SharedFrameData)));
+    if (!m_data) {
+        LOG_ERROR("Ipc", "SharedFrameWriter::Create", "IPC",
+                  "MapViewOfFile failed: {}", GetLastError());
+        CloseHandle(m_mapHandle);
+        m_mapHandle = nullptr;
+        return false;
+    }
+    std::memset(m_data, 0, sizeof(SharedFrameData));
+    LOG_INFO("Ipc", "SharedFrameWriter::Create", "IPC",
+             "Shared memory created for writing ({} bytes).",
+             sizeof(SharedFrameData));
+    return true;
+}
+
 void SharedFrameWriter::Write(const Engine::HeatmapFrame& frame) {
     if (!m_data) return;
 
@@ -217,6 +251,29 @@ bool SharedFrameReader::Create(const wchar_t* name) {
     std::memset(m_data, 0, sizeof(SharedFrameData));
     LOG_INFO("Ipc", "SharedFrameReader::Create", "IPC",
              "Shared memory created ({} bytes).", sizeof(SharedFrameData));
+    return true;
+}
+
+bool SharedFrameReader::Open(const wchar_t* name) {
+    m_mapHandle = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
+    if (!m_mapHandle) {
+        LOG_ERROR("Ipc", "SharedFrameReader::Open", "IPC",
+                  "OpenFileMapping failed: {}", GetLastError());
+        return false;
+    }
+    m_data = static_cast<SharedFrameData*>(
+        MapViewOfFile(m_mapHandle, FILE_MAP_READ, 0, 0,
+                      sizeof(SharedFrameData)));
+    if (!m_data) {
+        LOG_ERROR("Ipc", "SharedFrameReader::Open", "IPC",
+                  "MapViewOfFile failed: {}", GetLastError());
+        CloseHandle(m_mapHandle);
+        m_mapHandle = nullptr;
+        return false;
+    }
+    m_lastReadId = 0;
+    LOG_INFO("Ipc", "SharedFrameReader::Open", "IPC",
+             "Shared memory opened for reading.");
     return true;
 }
 

@@ -29,20 +29,14 @@ DefaultGroupName=EGoTouch
 DisableWelcomePage=no
 DisableDirPage=no
 
-; 允许用户在桌面创建快捷方式
-[Tasks]
-Name: "desktopicon"; Description: "在桌面创建 EGoTouch 诊断控制台快捷方式"; GroupDescription: "附加任务:"
-
 [Files]
 ; 复制主服务程序和相关文件
 Source: "..\build\EGoTouchService.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\build\EGoTouchApp.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; 复制任何可能的依赖项（如 config.ini），如果不存在可以先忽略。注：当前 build 目录下存在 config.ini
 Source: "..\build\config.ini"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 ; 在开始菜单创建 App（诊断控制台）的入口
-Name: "{group}\EGoTouch Diagnostics Workbench"; Filename: "{app}\EGoTouchApp.exe"
 Name: "{group}\卸载 EGoTouch"; Filename: "{uninstallexe}"
 ; 勾选创建桌面快捷方式时，生成快捷方式
 Name: "{commondesktop}\EGoTouch 诊控面板"; Filename: "{app}\EGoTouchApp.exe"; Tasks: desktopicon

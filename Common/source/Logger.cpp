@@ -50,7 +50,7 @@ void Logger::Init(const std::string& loggerName, const std::filesystem::path& lo
         );
 
         s_logger->set_level(spdlog::level::trace);
-        s_logger->flush_on(spdlog::level::warn);
+        s_logger->flush_on(spdlog::level::info);
 
         spdlog::register_logger(s_logger);
         spdlog::set_default_logger(s_logger);

@@ -130,8 +130,17 @@ int wmain(int argc, wchar_t* argv[]) {
 
     EnsureDataDirectory();
 
+    // Elevate process priority for real-time touch processing
+    if (!SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS)) {
+        // Fallback: try HIGH if REALTIME fails (e.g. insufficient privileges)
+        SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+    }
+
     Common::Logger::Init("EGoTouchService", "C:/ProgramData/EGoTouchRev/logs/",
                           Common::GuiLogSink::Instance());
+
+    LOG_INFO("Shell", "wmain", "Boot",
+             "Process priority set to REALTIME_PRIORITY_CLASS.");
 
     const bool consoleMode =
         (argc >= 2 && std::wstring_view(argv[1]) == L"--console");

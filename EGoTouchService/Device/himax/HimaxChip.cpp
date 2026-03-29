@@ -145,7 +145,7 @@ ChipResult<> Chip::NotifyTouchWakeup() {
     if (auto res = SetFrameReadNormalPolicy(); !res) return res;
     afe_mode = THP_AFE_MODE::Normal;
     LOG_INFO("Device", "Chip::NotifyTouchWakeup", GetStateStr(),
-             "Touch wakeup acknowledged, switched to normal read policy.");
+             "===== IDLE EXIT ===== Touch wakeup → Normal mode.");
     return {};
 }
 
@@ -706,7 +706,8 @@ ChipResult<> Chip::thp_afe_enter_idle(uint8_t param) {
     // 4. 更新状态标志位
     afe_mode.store(THP_AFE_MODE::Idle);
     
-    LOG_INFO("Device", "Chip::thp_afe_enter_idle", GetStateStr(), "Out!");
+    LOG_INFO("Device", "Chip::thp_afe_enter_idle", GetStateStr(),
+             "===== IDLE ENTER ===== No input detected, entering low-power idle.");
     return {};
 }
 
@@ -848,6 +849,20 @@ ChipResult<> Chip::Init(void) {
     // 标记连接就绪（后续 AFE 命令检查此状态）
     m_connState.store(ConnectionState::Connected);
 
+    if (auto res = thp_afe_clear_status(0x00); !res) {
+        LOG_WARN("Device", "Chip::Init", GetStateStr(),
+                 "clear_status failed (non-fatal), chip may use default rate");
+    } else {
+        LOG_INFO("Device", "Chip::Init", GetStateStr(), "clear_status success.");
+    }
+
+    if (auto res = thp_afe_start_calibration(); !res) {
+        LOG_WARN("Device", "Chip::Init", GetStateStr(),
+                 "start_calibration failed (non-fatal), chip may use default rate");
+    } else {
+        LOG_INFO("Device", "Chip::Init", GetStateStr(), "start_calibration success.");
+    }
+    
     // 强制芯片切换到 120Hz 扫描率（cmd=0x0E, val=0x00）
     // 确保上电后不处于芯片默认的低帧率或未知模式
     if (auto res = thp_afe_force_to_scan_rate(0x00); !res) {
@@ -914,16 +929,6 @@ bool Chip::isFingerDetected() const {
     uint16_t touch_y = readU16(kTouchYWord);
 
     bool detected = !((touch_x & 0xFF) == 0xFF && (touch_y & 0xFF) == 0xFF);
-
-    // 调试：每 120 帧打一条日志（约每秒一次）
-    static uint32_t s_logCounter = 0;
-    if ((s_logCounter++ % 120) == 0) {
-        LOG_INFO("Device", "Chip::isFingerDetected", "diag",
-                 "touch_x=0x{:04X} touch_y=0x{:04X} detected={}  "
-                 "raw[4915]={:02X} raw[4916]={:02X} raw[4917]={:02X} raw[4918]={:02X}",
-                 touch_x, touch_y, detected ? 1 : 0,
-                 back_data[4915], back_data[4916], back_data[4917], back_data[4918]);
-    }
 
     return detected;
 }
@@ -1086,7 +1091,7 @@ ChipResult<> Chip::GetFrame(void) {
         auto s_res = m_slave->GetFrame(back_data.data() + 5063, 339, nullptr);
 
         if (m_res && s_res) {
-            if (isFingerDetected() || isStylusDetected()) {
+            if (isFingerDetected()) {
                 (void)NotifyTouchWakeup();
                 LOG_INFO("Device", "Chip::GetFrame", GetStateStr(),
                          "Input detected in idle → wakeup to Normal");
@@ -1121,10 +1126,10 @@ ChipResult<> Chip::GetFrame(void) {
     }
     m_frameCount++;
 
-    // ── 零帧计数 & idle 自动进入 ──────────────────────────────
+    // ── 零帧计数 & idle 自动进入(暂时清除手写笔校验)) ──────────────────────────────
     constexpr uint32_t kIdleEntryThreshold = 600;  // ~5 秒 @120Hz
 
-    if (isFingerDetected() || isStylusDetected()) {
+    if (isFingerDetected()) {
         m_zeroFrameCount = 0;
     } else {
         m_zeroFrameCount++;
@@ -1139,7 +1144,7 @@ ChipResult<> Chip::GetFrame(void) {
 
     // 调试：每 600 帧打计数日志
     if ((m_frameCount % 600) == 0) {
-        LOG_INFO("Device", "Chip::GetFrame", GetStateStr(),
+        LOG_DEBUG("Device", "Chip::GetFrame", GetStateStr(),
                  "[IDLE-DIAG] m_frameCount={} m_zeroFrameCount={} afe_mode={}",
                  m_frameCount, m_zeroFrameCount,
                  afe_mode.load() == THP_AFE_MODE::Idle ? "Idle" : "Normal");

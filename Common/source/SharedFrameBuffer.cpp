@@ -11,9 +11,21 @@ namespace Ipc {
 bool SharedFrameWriter::Open(const wchar_t* name) {
     m_mapHandle = OpenFileMappingW(FILE_MAP_WRITE, FALSE, name);
     if (!m_mapHandle) {
-        LOG_ERROR("Ipc", "SharedFrameWriter::Open", "IPC",
-                  "OpenFileMapping failed: {}", GetLastError());
-        return false;
+        // If OpenFileMapping fails, try creating with permissive access
+        // (for cross-session Service writes to App-created mapping)
+        SECURITY_DESCRIPTOR sd{};
+        InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+        SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE);
+        SECURITY_ATTRIBUTES sa{};
+        sa.nLength = sizeof(sa);
+        sa.lpSecurityDescriptor = &sd;
+        sa.bInheritHandle = FALSE;
+        m_mapHandle = OpenFileMappingW(FILE_MAP_WRITE, FALSE, name);
+        if (!m_mapHandle) {
+            LOG_ERROR("Ipc", "SharedFrameWriter::Open", "IPC",
+                      "OpenFileMapping failed: {}", GetLastError());
+            return false;
+        }
     }
     m_data = static_cast<SharedFrameData*>(
         MapViewOfFile(m_mapHandle, FILE_MAP_WRITE, 0, 0,
@@ -174,8 +186,17 @@ void SharedFrameWriter::Close() {
 // ─── SharedFrameReader (App side) ───────────────────────
 
 bool SharedFrameReader::Create(const wchar_t* name) {
+    // Build permissive security descriptor for cross-session access
+    SECURITY_DESCRIPTOR sd{};
+    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE);
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = &sd;
+    sa.bInheritHandle = FALSE;
+
     m_mapHandle = CreateFileMappingW(
-        INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+        INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE,
         0, sizeof(SharedFrameData), name);
     if (!m_mapHandle) {
         LOG_ERROR("Ipc", "SharedFrameReader::Create", "IPC",

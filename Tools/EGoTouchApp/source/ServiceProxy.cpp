@@ -23,6 +23,8 @@
 
 namespace App {
 
+static const std::string kConfigPath = "C:/ProgramData/EGoTouchRev/config.ini";
+
 ServiceProxy::ServiceProxy()
     : m_dvrBuffer(std::make_unique<RingBuffer<Engine::HeatmapFrame, 480>>()) {
     // Build local pipeline (mirrors Service pipeline for GUI config editing)
@@ -157,7 +159,7 @@ bool ServiceProxy::StopRemoteRuntime() {
 }
 
 void ServiceProxy::SaveConfig() {
-    std::ofstream out("config.ini");
+    std::ofstream out(kConfigPath);
     if (!out.is_open()) return;
     for (auto& p : m_pipeline.GetProcessors()) {
         out << "[" << p->GetName() << "]\n";
@@ -177,7 +179,7 @@ void ServiceProxy::SaveConfig() {
 }
 
 void ServiceProxy::LoadConfig() {
-    std::ifstream in("config.ini");
+    std::ifstream in(kConfigPath);
     if (!in.is_open()) return;
     std::string line, section;
     Engine::IFrameProcessor* cur = nullptr;

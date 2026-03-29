@@ -33,9 +33,9 @@ void Logger::Init(const std::string& loggerName, const std::filesystem::path& lo
         // 格式: [%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v
         console_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%-7l%$] %v");
 
-        // 2. Daily File Sink (每天午夜轮转，最多保留 7 天)
+        // 2. Daily File Sink (每天午夜轮转，最多保留 3 个文件)
         fs::path file_path = logDir / (loggerName + ".txt");
-        auto file_sink = std::make_shared<spdlog::sinks::daily_file_sink_mt>(file_path.string(), 0, 0, false, 7);
+        auto file_sink = std::make_shared<spdlog::sinks::daily_file_sink_mt>(file_path.string(), 0, 0, false, 3);
         file_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%-7l] %v");
 
         std::vector<spdlog::sink_ptr> sinks {console_sink, file_sink};

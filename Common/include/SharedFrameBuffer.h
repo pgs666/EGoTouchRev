@@ -15,7 +15,7 @@ namespace Engine { struct HeatmapFrame; }
 namespace Ipc {
 
 // Fixed shared memory name
-constexpr const wchar_t* kSharedFrameName = L"Local\\EGoTouchSharedFrame";
+constexpr const wchar_t* kSharedFrameName = L"Global\\EGoTouchSharedFrame";
 
 // Maximum contacts in shared memory
 constexpr int kMaxSharedContacts = 10;

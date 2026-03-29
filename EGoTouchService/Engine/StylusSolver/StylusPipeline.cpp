@@ -142,16 +142,7 @@ bool StylusPipeline::Process(
     m_lastResult = StylusFrameData{};
     outPacket = StylusPacket{};
 
-    // Throttled diagnostic log (every 120 frames)
-    static uint32_t sFrameCount = 0;
-    if ((sFrameCount++ % 120) == 0 && rawData.size() > kMasterFrameBytes + 10) {
-        const uint8_t* slave = rawData.data() + kMasterFrameBytes;
-        LOG_INFO("StylusPipeline", "Process", "Diag",
-                 "frame#{} rawSz={} slave[0..9]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
-                 sFrameCount - 1, rawData.size(),
-                 slave[0], slave[1], slave[2], slave[3], slave[4],
-                 slave[5], slave[6], slave[7], slave[8], slave[9]);
-    }
+
 
     // 1. Parse slave words
     std::array<uint16_t, kSlaveWordCount> sw{};
@@ -204,7 +195,7 @@ bool StylusPipeline::Process(
         // Throttled log
         static int sSlvHdrLog = 0;
         if ((sSlvHdrLog++ % 120) == 0) {
-            LOG_INFO("StylusPipeline", "Process", "SlaveHdr",
+            LOG_TRACE("StylusPipeline", "Process", "SlaveHdr",
                      "hdr=[{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}] "
                      "press(off{})={} btn(off{})={}",
                      sHdr[0], sHdr[1], sHdr[2], sHdr[3],
@@ -230,7 +221,7 @@ bool StylusPipeline::Process(
     {
         static int sAnchorLogCount = 0;
         if ((sAnchorLogCount++ % 60) == 0) {
-            LOG_INFO("StylusPipeline", "Process", "Anchor",
+            LOG_TRACE("StylusPipeline", "Process", "Anchor",
                      "anchor=({},{}) grid_center={} sensorDim=({},{})",
                      m_gridData.tx1.anchorRow, m_gridData.tx1.anchorCol,
                      m_gridData.tx1.grid[4][4],
@@ -250,10 +241,7 @@ bool StylusPipeline::Process(
         return false;
     }
 
-    LOG_DEBUG("StylusPipeline", "Process", "Peak",
-              "peak=({},{}) val={} conn={}",
-              peak.peakRow, peak.peakCol,
-              peak.peakValue, peak.connectedPixels);
+
 
     // 6. 1D projection
     auto proj = m_peakDetector.ProjectTo1D(m_gridData.tx1.grid, peak);
@@ -347,7 +335,7 @@ bool StylusPipeline::Process(
         // Throttled diagnostic
         static int sPressLogCount = 0;
         if ((sPressLogCount++ % 120) == 0) {
-            LOG_INFO("StylusPipeline", "Process", "Meta",
+            LOG_DEBUG("StylusPipeline", "Process", "Meta",
                      "base={} pressIn={} suffix102={} suffix103={} "
                      "btMcu={} btn={} status=0x{:X} freq=({},{})",
                      meta.baseWord, pressureInput,

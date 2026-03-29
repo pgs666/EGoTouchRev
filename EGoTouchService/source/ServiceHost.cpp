@@ -103,7 +103,18 @@ bool ServiceHost::Start() {
                  "SystemStateMonitor started.");
     }
 
-    // ── 3. IPC Pipe Server ──────────────────────────────────
+#ifdef _DEBUG
+    // ── 3. Shared Memory (Service creates Global\\ mapping, debug only) ──
+    if (!m_frameWriter.Create(Ipc::kSharedFrameName)) {
+        LOG_WARN("ServiceHost", "Start", "IPC",
+                 "Failed to create shared memory; App debug will be disabled.");
+    } else {
+        LOG_INFO("ServiceHost", "Start", "IPC",
+                 "Shared memory created for App connection.");
+    }
+#endif
+
+    // ── 4. IPC Pipe Server ──────────────────────────────────
     m_configDirty.Open();
     m_ipcServer.SetCommandHandler(
         [this](const Ipc::IpcRequest& req) {
@@ -285,10 +296,10 @@ Ipc::IpcResponse ServiceHost::HandleIpcCommand(
         break;
 
     case Ipc::IpcCommand::EnterDebugMode: {
-        // param contains wchar_t shared memory name
-        const wchar_t* shmName =
-            reinterpret_cast<const wchar_t*>(req.param);
-        if (m_frameWriter.Open(shmName)) {
+#ifdef _DEBUG
+        // Shared memory is already created at startup.
+        // Just activate the frame push callback.
+        if (m_frameWriter.IsOpen()) {
             m_deviceRuntime->SetFramePushCallback(
                 [this](const Engine::HeatmapFrame& f) {
                     m_frameWriter.Write(f);
@@ -297,14 +308,22 @@ Ipc::IpcResponse ServiceHost::HandleIpcCommand(
             resp.success = true;
             LOG_INFO("ServiceHost", "HandleIpcCommand", "IPC",
                      "Entered debug mode.");
+        } else {
+            LOG_ERROR("ServiceHost", "HandleIpcCommand", "IPC",
+                      "EnterDebugMode rejected: shared memory not available.");
         }
+#else
+        LOG_WARN("ServiceHost", "HandleIpcCommand", "IPC",
+                 "EnterDebugMode not available in release build.");
+#endif
         break;
     }
 
     case Ipc::IpcCommand::ExitDebugMode:
+#ifdef _DEBUG
         m_deviceRuntime->SetFramePushCallback(nullptr);
-        m_frameWriter.Close();
         m_debugMode = false;
+#endif
         resp.success = true;
         LOG_INFO("ServiceHost", "HandleIpcCommand", "IPC",
                  "Exited debug mode.");

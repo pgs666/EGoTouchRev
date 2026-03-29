@@ -1,4 +1,5 @@
 #include "SystemStateMonitor.h"
+#include "Logger.h"
 
 #include <array>
 #include <utility>
@@ -158,12 +159,18 @@ void SystemStateMonitor::WorkerLoop() {
             INFINITE);
 
         if (wait_result == WAIT_OBJECT_0) {
+            LOG_INFO("Monitor", "WorkerLoop", "Stop",
+                     "Stop event signaled, exiting monitor loop.");
             break;
         }
 
         if (wait_result >= WAIT_OBJECT_0 + 1 && wait_result < WAIT_OBJECT_0 + 1 + kEventCount) {
             const std::size_t event_index = static_cast<std::size_t>(wait_result - WAIT_OBJECT_0 - 1);
             SystemStateEvent event = BuildEvent(event_index);
+
+            LOG_INFO("Monitor", "WorkerLoop", "Signal",
+                     "Named event[{}] signaled → type={}",
+                     event_index, ToString(event.type));
 
             if (m_callback) {
                 m_callback(event);
@@ -178,6 +185,9 @@ void SystemStateMonitor::WorkerLoop() {
         }
 
         // WAIT_FAILED/WAIT_ABANDONED are treated as hard stop for this monitor instance.
+        LOG_WARN("Monitor", "WorkerLoop", "Error",
+                 "WaitForMultipleObjects returned unexpected result: {}",
+                 wait_result);
         break;
     }
 

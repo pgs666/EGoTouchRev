@@ -29,6 +29,8 @@ private:
         DWORD ctrl, DWORD evtType,
         LPVOID evtData, LPVOID ctx);
 
+    void RegisterPowerNotifications();
+    void UnregisterPowerNotifications();
     void ReportStatus(DWORD state, DWORD waitHint = 0);
     void WaitForStop();
 
@@ -36,6 +38,11 @@ private:
     SERVICE_STATUS        m_status{};
     HANDLE                m_stopEvent = nullptr;
     ServiceHost           m_host;
+
+    // PBT power setting notification handles
+    HPOWERNOTIFY m_hDisplayNotify = nullptr;
+    HPOWERNOTIFY m_hLidNotify     = nullptr;
+    HPOWERNOTIFY m_hSuspendNotify = nullptr;
 };
 
 } // namespace Service

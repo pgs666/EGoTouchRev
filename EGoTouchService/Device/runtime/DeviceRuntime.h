@@ -27,10 +27,18 @@ enum class result { error, timeout };
 using ThreadResult = std::expected<void, result>;
 
 enum class workerState {
-    quit = -1,
-    ready = 0,
-    streaming,
-    recover,
+    suspend  = -2,   // 屏幕关闭/合盖 → worker 暂停（线程保留，等待唤醒）
+    quit     = -1,   // 服务终止/系统关机 → worker 线程退出
+    ready    =  0,   // 初始就绪
+    streaming,       // 正在采帧
+    recover,         // 恢复中
+};
+
+/// 停止原因（替代原来的 m_stopReq + m_shutdownReq 双 flag）
+enum class StopReason : uint8_t {
+    None = 0,
+    ScreenOff,   // DisplayOff / LidOff → 进入 suspend
+    Shutdown,    // 系统关机 / Stop() → 进入 quit
 };
 
 const char* ToString(workerState s) noexcept;
@@ -76,6 +84,7 @@ public:
     void Stop();
     bool IsShutdownRequested() const;
     bool IsRunning() const { return m_running.load(); }
+    bool IsSuspended() const { return m_state.load() == workerState::suspend; }
 
     // Auto/Manual 模式
     void SetAutoMode(bool enabled) { m_autoMode.store(enabled); }
@@ -114,6 +123,7 @@ private:
     void OnReady();              // ready → 尝试 auto init
     void OnStreaming();          // streaming → 采帧 + 处理
     void OnRecover();            // recover → 重试恢复
+    void OnSuspend();            // suspend → 屏幕关闭，暂停等待唤醒
     bool OnQuit();               // quit → 清理并退出
 
     struct QueuedCommand {
@@ -129,7 +139,7 @@ private:
                        bool ok, const std::string& det);
 
     std::atomic<workerState> m_state{workerState::quit};
-    std::atomic<bool> m_stopReq{false};
+    std::atomic<StopReason> m_stopReason{StopReason::None};
     std::atomic<bool> m_autoMode{false};
     std::atomic<bool> m_touchOnly{false};
     Himax::Chip m_chip;
@@ -137,6 +147,7 @@ private:
     Engine::StylusPipeline m_stylusPipeline;
     VhfReporter m_vhfReporter;
     uint8_t m_recoverCount = 0;
+    bool m_needSuspendDeinit = false;  // suspend 首次进入时执行 Deinit
 
     // GetFrame 连续非Timeout失败计数（容忍 AFE 命令后的短暂 bus 异常）
     static constexpr int kMaxConsecutiveFrameErrors = 3;
@@ -154,6 +165,5 @@ private:
     FramePushCallback m_framePushCb;
 
     std::atomic<bool> m_running{false};
-    bool m_shutdownReq = false;
     std::thread m_thread;
 };

@@ -13,7 +13,7 @@ Developed entirely through clean-room reverse engineering, this project aims to 
 ## 🌟 Key Features
 
 * **Native System Service (`EGoTouchService`)**: A rock-solid, C++ driven Windows service (`LocalSystem`) handling continuous touch frame acquisition, lifecycle monitoring, and seamless HID report injection.
-* **Hardware Integration**: Deep protocol-level integration with **Himax capacitive chips** and **BT MCU modules**, including unlocking high-polling-rate (240Hz) stylus modes.
+* **Hardware Integration**: Deep protocol-level integration with **Himax capacitive chips** for ultra-responsive multi-touch handling. *(Note: Active Stylus / BT-MCU integration is temporarily disconnected in this branch to focus on core touch stability)*.
 * **Custom Processing Pipeline**: Overhauled from scratch with anti-jitter, anti-bounce, and 1 Euro filtering for unparalleled touch smoothing and coordinate accuracy.
 * **Advanced Diagnostics**: Ships with `EGoTouchApp`, a native diagnostic GUI application (Diagnostics Workbench) for real-time visualization, raw data monitoring, and event logging.
 * **100% ARM64 Native Deployment**: Fully customized WiX v4 build toolkit ensuring that no WOW64 emulation is required—deployment is completely native to modern ARM64 systems.

@@ -90,7 +90,7 @@ public:
 
 private:
     static constexpr const wchar_t* kSharedMemName =
-        L"Local\\EGoTouchSharedFrame";
+        L"Global\\EGoTouchSharedFrame";
     static constexpr int kDvrCapacity = 480;
 
     Ipc::IpcPipeClient    m_client;

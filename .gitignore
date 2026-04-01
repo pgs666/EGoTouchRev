@@ -5,7 +5,6 @@ build/
 exports/
 release/
 .agents/
-SKILL.md
-.agentMemory/.claude/
+.claude/
 .brain/
 temp/

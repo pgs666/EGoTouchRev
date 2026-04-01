@@ -249,6 +249,3 @@ sequenceDiagram
 | 模式密码握手 | — | reg `0x10007F04` = `0x7777/0x1111/0xAAAA` | `hx_switch_mode` | AHB 寄存器直写 |
 
 
-
-
-

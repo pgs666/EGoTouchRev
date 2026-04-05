@@ -104,12 +104,20 @@ jobs:
           try {
             & msbuild "EGoTouchKm.vcxproj" "/t:ClCompile" "/p:Configuration=Release" "/p:Platform=ARM64" "/p:OutDir=build\\kmdf\\Release\\" "/p:IntDir=build\\kmdf\\obj\\Release\\" "/m"
             & msbuild "EGoTouchKm.vcxproj" "/t:Link" "/p:Configuration=Release" "/p:Platform=ARM64" "/p:OutDir=build\\kmdf\\Release\\" "/p:IntDir=build\\kmdf\\obj\\Release\\" "/m"
+
+            Write-Host "Build tree snapshot under project dir:"
+            Get-ChildItem . -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { -not $_.PSIsContainer -and $_.Name -match '\\.(sys|dll|exe|pdb|obj|lib|exp|map|inf)$' } |
+              Select-Object FullName, Length
           }
           finally {
             Pop-Location
           }
 
           $sysCandidates = Get-ChildItem "KernelDriver\EGoTouchKm" -Recurse -Filter *.sys -ErrorAction SilentlyContinue
+          if (-not $sysCandidates) {
+            $sysCandidates = Get-ChildItem . -Recurse -Filter *.sys -ErrorAction SilentlyContinue
+          }
           if (-not $sysCandidates) {
             throw "Driver binary .sys was not generated."
           }
@@ -126,6 +134,9 @@ jobs:
           $collected = @()
           foreach ($pat in $patterns) {
             $hits = Get-ChildItem "KernelDriver\EGoTouchKm" -Recurse -Filter $pat -ErrorAction SilentlyContinue
+            if (-not $hits) {
+              $hits = Get-ChildItem . -Recurse -Filter $pat -ErrorAction SilentlyContinue
+            }
             foreach ($h in $hits) {
               Copy-Item $h.FullName $artifactDir -Force
               $collected += $h

@@ -73,8 +73,34 @@ jobs:
           Get-ChildItem "C:\Program Files (x86)\Windows Kits\10" -Depth 2 -ErrorAction SilentlyContinue | Select-Object FullName
 
       - name: Build KMDF driver (Release|ARM64)
-        shell: cmd
+        shell: pwsh
         run: |
+          $ntddk = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" -Filter ntddk.h -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+
+          if (-not $ntddk) {
+            throw "ntddk.h not found after WDK installation."
+          }
+
+          $kmDir = Split-Path $ntddk.FullName -Parent
+          $verRoot = Split-Path $kmDir -Parent
+          $sharedDir = Join-Path $verRoot "shared"
+          $ucrtDir = Join-Path $verRoot "ucrt"
+          $umDir = Join-Path $verRoot "um"
+
+          $versionName = Split-Path $verRoot -Leaf
+          $libRoot = "C:\Program Files (x86)\Windows Kits\10\Lib\$versionName"
+          $kmLibArm64 = Join-Path $libRoot "km\arm64"
+          $umLibArm64 = Join-Path $libRoot "um\arm64"
+          $ucrtLibArm64 = Join-Path $libRoot "ucrt\arm64"
+
+          Write-Host "Detected WDK include root: $verRoot"
+          Write-Host "Detected WDK lib root: $libRoot"
+
+          $env:INCLUDE = "$kmDir;$sharedDir;$ucrtDir;$umDir;$env:INCLUDE"
+          $env:LIB = "$kmLibArm64;$umLibArm64;$ucrtLibArm64;$env:LIB"
+
           msbuild KernelDriver\EGoTouchKm\EGoTouchKm.sln /t:Build /p:Configuration=Release /p:Platform=ARM64 /m
 
       - name: Collect build artifacts

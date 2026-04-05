@@ -26,19 +26,51 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Install Windows Driver Kit (WDK)
+      - name: Ensure Windows Driver Kit (WDK)
         shell: pwsh
         run: |
-          if (Test-Path "C:\Program Files (x86)\Windows Kits\10\build\WindowsDriver.Common.targets") {
-            Write-Host "WDK already present, skip install."
+          function Find-WdkTargets {
+            $roots = @(
+              "$env:ProgramFiles(x86)\Windows Kits\10\build",
+              "$env:ProgramFiles\Windows Kits\10\build",
+              "$env:ProgramFiles(x86)\Windows Kits\10\Build",
+              "$env:ProgramFiles\Windows Kits\10\Build"
+            )
+
+            foreach ($r in $roots) {
+              if (Test-Path $r) {
+                $hit = Get-ChildItem -Path $r -Filter "WindowsDriver.Common.targets" -Recurse -ErrorAction SilentlyContinue |
+                  Sort-Object FullName -Descending |
+                  Select-Object -First 1
+                if ($hit) {
+                  return $hit.FullName
+                }
+              }
+            }
+
+            return $null
+          }
+
+          $wdkTargets = Find-WdkTargets
+          if ($wdkTargets) {
+            Write-Host "WDK already present: $wdkTargets"
             exit 0
           }
 
           choco install windowsdriverkit10 --yes --no-progress
 
-          if (-not (Test-Path "C:\Program Files (x86)\Windows Kits\10\build\WindowsDriver.Common.targets")) {
-            throw "WDK installation check failed: WindowsDriver.Common.targets not found."
+          $wdkTargets = Find-WdkTargets
+          if ($wdkTargets) {
+            Write-Host "WDK installed and detected: $wdkTargets"
+          } else {
+            Write-Warning "WDK install command succeeded but WindowsDriver.Common.targets was not found in common paths."
+            Write-Warning "Continuing to build so we can capture full MSBuild diagnostics."
           }
+
+      - name: Show WDK/SDK path snapshot
+        shell: pwsh
+        run: |
+          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10" -Depth 2 -ErrorAction SilentlyContinue | Select-Object FullName
 
       - name: Build KMDF driver (Release|ARM64)
         shell: cmd

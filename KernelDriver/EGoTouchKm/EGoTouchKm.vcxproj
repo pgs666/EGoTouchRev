@@ -17,7 +17,6 @@
     <RootNamespace>EGoTouchKm</RootNamespace>
     <Platform>ARM64</Platform>
     <TargetVersion>Windows10</TargetVersion>
-    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>KMDF</DriverType>
     <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>

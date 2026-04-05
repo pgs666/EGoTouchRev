@@ -42,7 +42,12 @@
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
 
-  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\WindowsDriver.Common.props"
+            Condition="Exists('$(VCTargetsPath)\BuildCustomizations\WindowsDriver.Common.props')" />
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\WindowsKernelModeDriver10.0.props"
+            Condition="Exists('$(VCTargetsPath)\BuildCustomizations\WindowsKernelModeDriver10.0.props')" />
+  </ImportGroup>
   <ImportGroup Label="Shared" />
 
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
@@ -117,5 +122,10 @@
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <ImportGroup Label="ExtensionTargets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\WindowsDriver.Common.targets"
+            Condition="Exists('$(VCTargetsPath)\BuildCustomizations\WindowsDriver.Common.targets')" />
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\WindowsKernelModeDriver10.0.targets"
+            Condition="Exists('$(VCTargetsPath)\BuildCustomizations\WindowsKernelModeDriver10.0.targets')" />
+  </ImportGroup>
 </Project>

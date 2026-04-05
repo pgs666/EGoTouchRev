@@ -100,15 +100,21 @@ jobs:
 
           # CI runner currently has unstable InfVerif/ApiValidator dependencies.
           # Build compile+link outputs directly to guarantee ARM64 .sys artifact generation.
-          & msbuild "KernelDriver\EGoTouchKm\EGoTouchKm.vcxproj" "/t:ClCompile" "/p:Configuration=Release" "/p:Platform=ARM64" "/p:OutDir=build\\kmdf\\Release\\" "/p:IntDir=build\\kmdf\\obj\\Release\\" "/m"
-          & msbuild "KernelDriver\EGoTouchKm\EGoTouchKm.vcxproj" "/t:Link" "/p:Configuration=Release" "/p:Platform=ARM64" "/p:OutDir=build\\kmdf\\Release\\" "/p:IntDir=build\\kmdf\\obj\\Release\\" "/m"
+          Push-Location "KernelDriver\EGoTouchKm"
+          try {
+            & msbuild "EGoTouchKm.vcxproj" "/t:ClCompile" "/p:Configuration=Release" "/p:Platform=ARM64" "/p:OutDir=build\\kmdf\\Release\\" "/p:IntDir=build\\kmdf\\obj\\Release\\" "/m"
+            & msbuild "EGoTouchKm.vcxproj" "/t:Link" "/p:Configuration=Release" "/p:Platform=ARM64" "/p:OutDir=build\\kmdf\\Release\\" "/p:IntDir=build\\kmdf\\obj\\Release\\" "/m"
+          }
+          finally {
+            Pop-Location
+          }
 
-          $sys = "KernelDriver\EGoTouchKm\build\kmdf\Release\EGoTouchKm.sys"
-          if (-not (Test-Path $sys)) {
-            Write-Warning "Expected output not found at $sys. Dumping all .sys under project:"
-            Get-ChildItem "KernelDriver\EGoTouchKm" -Recurse -Filter *.sys -ErrorAction SilentlyContinue | Select-Object FullName
+          $sysCandidates = Get-ChildItem "KernelDriver\EGoTouchKm" -Recurse -Filter *.sys -ErrorAction SilentlyContinue
+          if (-not $sysCandidates) {
             throw "Driver binary .sys was not generated."
           }
+          Write-Host "Detected sys outputs:"
+          $sysCandidates | Select-Object FullName, Length
 
       - name: Collect build artifacts
         shell: pwsh

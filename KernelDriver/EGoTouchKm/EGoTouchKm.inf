@@ -1,0 +1,58 @@
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+DriverVer   = 04/05/2026,1.0.0.0
+CatalogFile = EGoTouchKm.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+EGoTouchKm.sys = 1
+
+[Manufacturer]
+%ManufacturerName% = EGo,NTarm64
+
+[EGo.NTarm64]
+%DeviceDesc% = EGo_Install, Root\EGoTouchKm
+
+[EGo_Install]
+CopyFiles = DriverCopyFiles
+
+[DriverCopyFiles]
+EGoTouchKm.sys
+
+[EGo_Install.Services]
+AddService = EGoTouchKm,0x00000002,EGo_Service_Inst
+
+[EGo_Service_Inst]
+DisplayName    = %ServiceDisplayName%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\EGoTouchKm.sys
+LoadOrderGroup = Base
+
+[EGo_Install.Wdf]
+KmdfService = EGoTouchKm, EGo_WdfSect
+
+[EGo_WdfSect]
+KmdfLibraryVersion = 1.33
+
+[EGo_Install.HW]
+AddReg = EGo_Hw_AddReg
+
+[EGo_Hw_AddReg]
+HKR,,DeviceCharacteristics,0x10001,0x100
+
+[Strings]
+ManufacturerName  = "EGoTouchRev"
+DiskName          = "EGoTouch ARM64 KMDF Driver Disk"
+DeviceDesc        = "EGoTouch ARM64 Kernel Driver"
+ServiceDisplayName = "EGoTouch ARM64 KMDF Driver"

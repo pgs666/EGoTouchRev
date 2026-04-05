@@ -1,0 +1,81 @@
+name: Build EGoTouch KMDF (ARM64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "KernelDriver/EGoTouchKm/**"
+      - "scripts/build_kmdf_driver.bat"
+      - ".github/workflows/build-kmdf-arm64.yml"
+  pull_request:
+    paths:
+      - "KernelDriver/EGoTouchKm/**"
+      - "scripts/build_kmdf_driver.bat"
+      - ".github/workflows/build-kmdf-arm64.yml"
+
+jobs:
+  build-arm64-kmdf:
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install Windows Driver Kit (WDK)
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files (x86)\Windows Kits\10\build\WindowsDriver.Common.targets") {
+            Write-Host "WDK already present, skip install."
+            exit 0
+          }
+
+          choco install windowsdriverkit10 --yes --no-progress
+
+          if (-not (Test-Path "C:\Program Files (x86)\Windows Kits\10\build\WindowsDriver.Common.targets")) {
+            throw "WDK installation check failed: WindowsDriver.Common.targets not found."
+          }
+
+      - name: Build KMDF driver (Release|ARM64)
+        shell: cmd
+        run: |
+          msbuild KernelDriver\EGoTouchKm\EGoTouchKm.sln /t:Build /p:Configuration=Release /p:Platform=ARM64 /m
+
+      - name: Collect build artifacts
+        shell: pwsh
+        run: |
+          $artifactDir = "${{ github.workspace }}\artifact-kmdf-arm64"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+          $candidates = @(
+            "KernelDriver\EGoTouchKm\build\kmdf\Release",
+            "KernelDriver\EGoTouchKm\ARM64\Release",
+            "KernelDriver\EGoTouchKm\x64\Release"
+          )
+
+          $copied = $false
+          foreach ($p in $candidates) {
+            if (Test-Path $p) {
+              Copy-Item "$p\*" $artifactDir -Recurse -Force -ErrorAction SilentlyContinue
+              $copied = $true
+            }
+          }
+
+          Copy-Item "KernelDriver\EGoTouchKm\EGoTouchKm.inf" $artifactDir -Force
+          Copy-Item "scripts\install_kmdf_driver.bat" $artifactDir -Force
+          Copy-Item "scripts\uninstall_kmdf_driver.bat" $artifactDir -Force
+
+          if (-not $copied) {
+            Write-Warning "No binary output folder matched expected candidates. Please check project OutDir."
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EGoTouchKm-ARM64
+          path: artifact-kmdf-arm64
+          if-no-files-found: error

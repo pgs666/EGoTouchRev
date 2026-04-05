@@ -100,7 +100,8 @@ jobs:
 
           # CI runner currently has unstable InfVerif/ApiValidator dependencies.
           # Build compile+link outputs directly to guarantee ARM64 .sys artifact generation.
-          msbuild KernelDriver\EGoTouchKm\EGoTouchKm.vcxproj /t:ClCompile;Link /p:Configuration=Release /p:Platform=ARM64 /m
+          msbuild KernelDriver\EGoTouchKm\EGoTouchKm.vcxproj /t:ClCompile /p:Configuration=Release /p:Platform=ARM64 /m
+          msbuild KernelDriver\EGoTouchKm\EGoTouchKm.vcxproj /t:Link /p:Configuration=Release /p:Platform=ARM64 /m
 
       - name: Collect build artifacts
         shell: pwsh
